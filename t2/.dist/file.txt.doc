@@ -1,0 +1,4419 @@
+fin2
+|--backend
+	|--config
+		|--db.js
+			const mongoose = require('mongoose');
+require('dotenv').config();
+
+const connectDB = async () => {
+    try {
+        await mongoose.connect(process.env.MONGO_URI, {
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
+        });
+        console.log('MongoDB Connected...');
+    } catch (err) {
+        console.error(err.message);
+        
+        process.exit(1);
+    }
+};
+
+module.exports = connectDB;
+	|--controllers
+		|--budgetController.js
+		// backend/controllers/budgetController.js
+const Budget = require('../models/Budget');
+
+// @desc    Get all budgets for a user
+// @route   GET /api/budgets
+// @access  Private
+exports.getBudgets = async (req, res) => {
+    try {
+        const budgets = await Budget.find({ user: req.user.id }).sort({ startDate: -1 });
+        res.json(budgets);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get single budget by ID for a user
+// @route   GET /api/budgets/:id
+// @access  Private
+exports.getBudgetById = async (req, res) => {
+    try {
+        const budget = await Budget.findById(req.params.id);
+
+        if (!budget) {
+            return res.status(404).json({ msg: 'Budget not found' });
+        }
+
+        // Ensure budget belongs to the logged-in user
+        if (budget.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to view this budget' });
+        }
+
+        res.json(budget);
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') { // Handle invalid ObjectId format
+            return res.status(400).json({ msg: 'Invalid Budget ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Create a new budget
+// @route   POST /api/budgets
+// @access  Private
+exports.createBudget = async (req, res) => {
+    const { name, period, startDate, endDate, categories, description } = req.body;
+
+    try {
+        const newBudget = new Budget({
+            user: req.user.id, // Comes from auth middleware
+            name,
+            period,
+            startDate,
+            endDate,
+            categories,
+            description
+        });
+
+        const budget = await newBudget.save();
+        res.status(201).json(budget); // 201 Created
+    } catch (err) {
+        console.error(err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Update an existing budget
+// @route   PUT /api/budgets/:id
+// @access  Private
+exports.updateBudget = async (req, res) => {
+    const { name, period, startDate, endDate, categories, description } = req.body;
+
+    try {
+        let budget = await Budget.findById(req.params.id);
+
+        if (!budget) {
+            return res.status(404).json({ msg: 'Budget not found' });
+        }
+
+        // Ensure budget belongs to the logged-in user
+        if (budget.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to update this budget' });
+        }
+
+        // Update fields
+        budget.name = name || budget.name;
+        budget.period = period || budget.period;
+        budget.startDate = startDate || budget.startDate;
+        budget.endDate = endDate || budget.endDate;
+        budget.categories = categories || budget.categories;
+        budget.description = description || budget.description;
+
+        await budget.save(); // pre-save hook will update totalAllocatedAmount and updatedAt
+        res.json(budget);
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Budget ID' });
+        }
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Delete a budget
+// @route   DELETE /api/budgets/:id
+// @access  Private
+exports.deleteBudget = async (req, res) => {
+    try {
+        const budget = await Budget.findById(req.params.id);
+
+        if (!budget) {
+            return res.status(404).json({ msg: 'Budget not found' });
+        }
+
+        // Ensure budget belongs to the logged-in user
+        if (budget.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to delete this budget' });
+        }
+
+        await Budget.deleteOne({ _id: req.params.id }); // Use deleteOne for Mongoose 6+
+
+        res.json({ msg: 'Budget removed' });
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Budget ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+		|--dashboardController.js
+		// backend/controllers/dashboardController.js
+const Expense = require('../models/Expense');
+const Income = require('../models/Income');
+const Budget = require('../models/Budget');
+const mongoose = require('mongoose'); // Ensure mongoose is imported for ObjectId
+
+// Helper function to calculate start and end of current month (already exists)
+const getCurrentMonthDateRange = () => {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    endOfMonth.setHours(23, 59, 59, 999);
+    return { startOfMonth, endOfMonth };
+};
+
+// Helper function to calculate start and end of a given period
+const getDateRangeForPeriod = (period, year, month = null) => {
+    let startDate, endDate;
+    const now = new Date(); // Use current date as reference if year/month not provided
+
+    const y = year || now.getFullYear();
+    const m = month !== null ? parseInt(month) : now.getMonth();
+
+    switch (period) {
+        case 'monthly':
+            startDate = new Date(y, m, 1);
+            endDate = new Date(y, m + 1, 0);
+            break;
+        case 'quarterly':
+            const quarter = Math.floor(m / 3);
+            startDate = new Date(y, quarter * 3, 1);
+            endDate = new Date(y, quarter * 3 + 3, 0);
+            break;
+        case 'annually':
+            startDate = new Date(y, 0, 1);
+            endDate = new Date(y, 11, 31);
+            break;
+        default: // Current month as default
+            return getCurrentMonthDateRange();
+    }
+    endDate.setHours(23, 59, 59, 999); // Set to end of day for accurate filtering
+    return { startDate, endDate };
+};
+
+
+// @desc    Get dashboard summary data for a user (already exists)
+// @route   GET /api/dashboard/summary
+// @access  Private
+exports.getDashboardSummary = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startOfMonth, endOfMonth } = getCurrentMonthDateRange();
+
+        // 1. Total Income for current month
+        const totalIncomeResult = await Income.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(userId), date: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalIncome = totalIncomeResult.length > 0 ? totalIncomeResult[0].total : 0;
+
+        // 2. Total Expenses for current month
+        const totalExpenseResult = await Expense.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(userId), date: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalExpenses = totalExpenseResult.length > 0 ? totalExpenseResult[0].total : 0;
+
+        // 3. Current Balance (current month)
+        const currentMonthBalance = totalIncome - totalExpenses;
+
+        // 4. Budget vs Actual (for current month, if a monthly budget exists)
+        const activeMonthlyBudget = await Budget.findOne({
+            user: userId,
+            period: 'monthly',
+            startDate: { $lte: endOfMonth },
+            endDate: { $gte: startOfMonth }
+        });
+
+        let budgetVsActual = null;
+        if (activeMonthlyBudget) {
+            const budgetCategories = activeMonthlyBudget.categories.filter(cat => cat.type === 'expense');
+            const budgetedExpenseTotal = budgetCategories.reduce((acc, cat) => acc + cat.allocatedAmount, 0);
+
+            const actualExpensesByCategory = await Expense.aggregate([
+                {
+                    $match: {
+                        user: new mongoose.Types.ObjectId(userId),
+                        date: { $gte: activeMonthlyBudget.startDate, $lte: activeMonthlyBudget.endDate },
+                        category: { $in: budgetCategories.map(cat => cat.name) }
+                    }
+                },
+                { $group: { _id: '$category', totalSpent: { $sum: '$amount' } } }
+            ]);
+
+            const actualExpensesMap = new Map();
+            actualExpensesByCategory.forEach(item => {
+                actualExpensesMap.set(item._id, item.totalSpent);
+            });
+
+            const categoryBreakdown = budgetCategories.map(bCat => ({
+                category: bCat.name,
+                budgeted: bCat.allocatedAmount,
+                spent: actualExpensesMap.get(bCat.name) || 0,
+                remaining: bCat.allocatedAmount - (actualExpensesMap.get(bCat.name) || 0)
+            }));
+
+            const totalActualExpenses = actualExpensesByCategory.reduce((acc, item) => acc + item.totalSpent, 0);
+
+            budgetVsActual = {
+                budgetName: activeMonthlyBudget.name,
+                budgetPeriod: activeMonthlyBudget.period,
+                budgetStartDate: activeMonthlyBudget.startDate,
+                budgetEndDate: activeMonthlyBudget.endDate,
+                totalBudgetedExpenses: budgetedExpenseTotal,
+                totalActualExpenses: totalActualExpenses,
+                remainingBudget: budgetedExpenseTotal - totalActualExpenses,
+                categoryBreakdown: categoryBreakdown
+            };
+        }
+
+        // 5. Recent Transactions (last 5 expenses and 5 income, sorted by date)
+        const recentExpenses = await Expense.find({ user: userId })
+            .sort({ date: -1, createdAt: -1 })
+            .limit(5);
+
+        const recentIncome = await Income.find({ user: userId })
+            .sort({ date: -1, createdAt: -1 })
+            .limit(5);
+
+        const recentTransactions = [...recentExpenses, ...recentIncome]
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, 10);
+
+        res.json({
+            totalIncome: totalIncome,
+            totalExpenses: totalExpenses,
+            currentMonthBalance: currentMonthBalance,
+            budgetVsActual: budgetVsActual,
+            recentTransactions: recentTransactions
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+
+// --- New Reporting Endpoints ---
+
+// @desc    Get expenses by category for a given period
+// @route   GET /api/dashboard/reports/expenses-by-category
+// @access  Private
+// @query   period=monthly/quarterly/annually, year=YYYY, month=MM (optional)
+exports.getExpensesByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { period, year, month } = req.query;
+        const { startDate, endDate } = getDateRangeForPeriod(period, year, month);
+
+        const expensesByCategory = await Expense.aggregate([
+            {
+                $match: {
+                    user: new mongoose.Types.ObjectId(userId),
+                    date: { $gte: startDate, $lte: endDate }
+                }
+            },
+            {
+                $group: {
+                    _id: '$category',
+                    totalAmount: { $sum: '$amount' },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { totalAmount: -1 } } // Sort by highest spending category
+        ]);
+
+        res.json({ startDate, endDate, expensesByCategory });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get income by category for a given period
+// @route   GET /api/dashboard/reports/income-by-category
+// @access  Private
+// @query   period=monthly/quarterly/annually, year=YYYY, month=MM (optional)
+exports.getIncomeByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { period, year, month } = req.query;
+        const { startDate, endDate } = getDateRangeForPeriod(period, year, month);
+
+        const incomeByCategory = await Income.aggregate([
+            {
+                $match: {
+                    user: new mongoose.Types.ObjectId(userId),
+                    date: { $gte: startDate, $lte: endDate }
+                }
+            },
+            {
+                $group: {
+                    _id: '$category',
+                    totalAmount: { $sum: '$amount' },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { totalAmount: -1 } } // Sort by highest income category
+        ]);
+
+        res.json({ startDate, endDate, incomeByCategory });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get daily/monthly/yearly transaction totals for a given period (trend data)
+// @route   GET /api/dashboard/reports/transaction-trends
+// @access  Private
+// @query   type=expense/income, period=monthly/yearly (for grouping), year=YYYY (required for yearly)
+exports.getTransactionTrends = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { type, period, year } = req.query; // period here refers to the aggregation interval (e.g., 'monthly', 'yearly')
+
+        if (!type || (period === 'yearly' && !year)) {
+            return res.status(400).json({ msg: 'Missing type or year for yearly trends.' });
+        }
+
+        const Model = type === 'expense' ? Expense : Income;
+        const groupFormat = period === 'monthly' ? { $dateToString: { format: '%Y-%m', date: '$date' } } : { $dateToString: { format: '%Y', date: '$date' } };
+        const matchQuery = { user: new mongoose.Types.ObjectId(userId) };
+
+        if (year) {
+            const startOfYear = new Date(year, 0, 1);
+            const endOfYear = new Date(parseInt(year) + 1, 0, 0); // Last day of that year
+            endOfYear.setHours(23, 59, 59, 999);
+            matchQuery.date = { $gte: startOfYear, $lte: endOfYear };
+        }
+
+        const trends = await Model.aggregate([
+            { $match: matchQuery },
+            {
+                $group: {
+                    _id: groupFormat,
+                    totalAmount: { $sum: '$amount' }
+                }
+            },
+            { $sort: { _id: 1 } } // Sort by date string
+        ]);
+
+        res.json({ type, period, year, trends });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+		|--expenseController.js
+        // backend/controllers/expenseController.js
+const Expense = require('../models/Expense');
+
+// @desc    Get all expenses for a user
+// @route   GET /api/expenses
+// @access  Private
+exports.getExpenses = async (req, res) => {
+    try {
+        const expenses = await Expense.find({ user: req.user.id }).sort({ date: -1, createdAt: -1 });
+        res.json(expenses);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get single expense by ID for a user
+// @route   GET /api/expenses/:id
+// @access  Private
+exports.getExpenseById = async (req, res) => {
+    try {
+        const expense = await Expense.findById(req.params.id);
+
+        if (!expense) {
+            return res.status(404).json({ msg: 'Expense not found' });
+        }
+
+        // Ensure expense belongs to the logged-in user
+        if (expense.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to view this expense' });
+        }
+
+        res.json(expense);
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Expense ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Create a new expense
+// @route   POST /api/expenses
+// @access  Private
+exports.createExpense = async (req, res) => {
+    const { description, amount, date, category, notes } = req.body;
+
+    try {
+        const newExpense = new Expense({
+            user: req.user.id, // Comes from auth middleware
+            description,
+            amount,
+            date,
+            category,
+            notes
+        });
+
+        const expense = await newExpense.save();
+        res.status(201).json(expense); // 201 Created
+    } catch (err) {
+        console.error(err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Update an existing expense
+// @route   PUT /api/expenses/:id
+// @access  Private
+exports.updateExpense = async (req, res) => {
+    const { description, amount, date, category, notes } = req.body;
+
+    try {
+        let expense = await Expense.findById(req.params.id);
+
+        if (!expense) {
+            return res.status(404).json({ msg: 'Expense not found' });
+        }
+
+        // Ensure expense belongs to the logged-in user
+        if (expense.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to update this expense' });
+        }
+
+        // Update fields
+        expense.description = description || expense.description;
+        expense.amount = amount !== undefined ? amount : expense.amount; // Allow 0 to be a valid update
+        expense.date = date || expense.date;
+        expense.category = category || expense.category;
+        expense.notes = notes || expense.notes;
+
+        await expense.save();
+        res.json(expense);
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Expense ID' });
+        }
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Delete an expense
+// @route   DELETE /api/expenses/:id
+// @access  Private
+exports.deleteExpense = async (req, res) => {
+    try {
+        const expense = await Expense.findById(req.params.id);
+
+        if (!expense) {
+            return res.status(404).json({ msg: 'Expense not found' });
+        }
+
+        // Ensure expense belongs to the logged-in user
+        if (expense.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to delete this expense' });
+        }
+
+        await Expense.deleteOne({ _id: req.params.id });
+
+        res.json({ msg: 'Expense removed' });
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Expense ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+		|--incomeController.js
+        // backend/controllers/incomeController.js
+const Income = require('../models/Income');
+
+// @desc    Get all income entries for a user
+// @route   GET /api/income
+// @access  Private
+exports.getIncome = async (req, res) => {
+    try {
+        const income = await Income.find({ user: req.user.id }).sort({ date: -1, createdAt: -1 });
+        res.json(income);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get single income entry by ID for a user
+// @route   GET /api/income/:id
+// @access  Private
+exports.getIncomeById = async (req, res) => {
+    try {
+        const income = await Income.findById(req.params.id);
+
+        if (!income) {
+            return res.status(404).json({ msg: 'Income entry not found' });
+        }
+
+        // Ensure income belongs to the logged-in user
+        if (income.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to view this income entry' });
+        }
+
+        res.json(income);
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Income ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Create a new income entry
+// @route   POST /api/income
+// @access  Private
+exports.createIncome = async (req, res) => {
+    const { description, amount, date, category, notes } = req.body;
+
+    try {
+        const newIncome = new Income({
+            user: req.user.id, // Comes from auth middleware
+            description,
+            amount,
+            date,
+            category,
+            notes
+        });
+
+        const income = await newIncome.save();
+        res.status(201).json(income); // 201 Created
+    } catch (err) {
+        console.error(err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Update an existing income entry
+// @route   PUT /api/income/:id
+// @access  Private
+exports.updateIncome = async (req, res) => {
+    const { description, amount, date, category, notes } = req.body;
+
+    try {
+        let income = await Income.findById(req.params.id);
+
+        if (!income) {
+            return res.status(404).json({ msg: 'Income entry not found' });
+        }
+
+        // Ensure income belongs to the logged-in user
+        if (income.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to update this income entry' });
+        }
+
+        // Update fields
+        income.description = description || income.description;
+        income.amount = amount !== undefined ? amount : income.amount; // Allow 0 to be a valid update (though min:0.01 prevents it)
+        income.date = date || income.date;
+        income.category = category || income.category;
+        income.notes = notes || income.notes;
+
+        await income.save();
+        res.json(income);
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Income ID' });
+        }
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ msg: err.message });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Delete an income entry
+// @route   DELETE /api/income/:id
+// @access  Private
+exports.deleteIncome = async (req, res) => {
+    try {
+        const income = await Income.findById(req.params.id);
+
+        if (!income) {
+            return res.status(404).json({ msg: 'Income entry not found' });
+        }
+
+        // Ensure income belongs to the logged-in user
+        if (income.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'Not authorized to delete this income entry' });
+        }
+
+        await Income.deleteOne({ _id: req.params.id });
+
+        res.json({ msg: 'Income entry removed' });
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(400).json({ msg: 'Invalid Income ID' });
+        }
+        res.status(500).send('Server Error');
+    }
+};
+		|--reportController.js
+        // backend/controllers/reportController.js
+const Expense = require('../models/Expense');
+const Income = require('../models/Income');
+const mongoose = require('mongoose'); // Ensure mongoose is imported for ObjectId
+
+// Helper function to validate and parse date ranges
+const parseDateRange = (startDateStr, endDateStr) => {
+    const startDate = startDateStr ? new Date(startDateStr) : null;
+    const endDate = endDateStr ? new Date(endDateStr) : null;
+
+    if (startDate && isNaN(startDate.getTime())) {
+        throw new Error('Invalid start date.');
+    }
+    if (endDate && isNaN(endDate.getTime())) {
+        throw new Error('Invalid end date.');
+    }
+
+    // Adjust endDate to end of day for inclusive filtering
+    if (endDate) {
+        endDate.setHours(23, 59, 59, 999);
+    }
+
+    return { startDate, endDate };
+};
+
+// @desc    Get spending by category report
+// @route   GET /api/reports/spending-by-category
+// @access  Private
+exports.getSpendingByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        const report = await Expense.aggregate([
+            { $match: matchStage },
+            { $group: { _id: '$category', totalSpent: { $sum: '$amount' } } },
+            { $sort: { totalSpent: -1 } }
+        ]);
+
+        res.json(report);
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+
+// @desc    Get income by category report
+// @route   GET /api/reports/income-by-category
+// @access  Private
+exports.getIncomeByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        const report = await Income.aggregate([
+            { $match: matchStage },
+            { $group: { _id: '$category', totalReceived: { $sum: '$amount' } } },
+            { $sort: { totalReceived: -1 } }
+        ]);
+
+        res.json(report);
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+
+// @desc    Get net income/loss report for a period
+// @route   GET /api/reports/net-income
+// @access  Private
+exports.getNetIncomeReport = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        // Calculate total income for the period
+        const totalIncomeResult = await Income.aggregate([
+            { $match: matchStage },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalIncome = totalIncomeResult.length > 0 ? totalIncomeResult[0].total : 0;
+
+        // Calculate total expenses for the period
+        const totalExpenseResult = await Expense.aggregate([
+            { $match: matchStage },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalExpenses = totalExpenseResult.length > 0 ? totalExpenseResult[0].total : 0;
+
+        const netIncome = totalIncome - totalExpenses;
+
+        res.json({
+            startDate: startDate ? startDate.toISOString().split('T')[0] : null,
+            endDate: endDate ? endDate.toISOString().split('T')[0] : null,
+            totalIncome,
+            totalExpenses,
+            netIncome
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+	|--middleware
+        |--Auth.js
+        // backend/controllers/reportController.js
+const Expense = require('../models/Expense');
+const Income = require('../models/Income');
+const mongoose = require('mongoose'); // Ensure mongoose is imported for ObjectId
+
+// Helper function to validate and parse date ranges
+const parseDateRange = (startDateStr, endDateStr) => {
+    const startDate = startDateStr ? new Date(startDateStr) : null;
+    const endDate = endDateStr ? new Date(endDateStr) : null;
+
+    if (startDate && isNaN(startDate.getTime())) {
+        throw new Error('Invalid start date.');
+    }
+    if (endDate && isNaN(endDate.getTime())) {
+        throw new Error('Invalid end date.');
+    }
+
+    // Adjust endDate to end of day for inclusive filtering
+    if (endDate) {
+        endDate.setHours(23, 59, 59, 999);
+    }
+
+    return { startDate, endDate };
+};
+
+// @desc    Get spending by category report
+// @route   GET /api/reports/spending-by-category
+// @access  Private
+exports.getSpendingByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        const report = await Expense.aggregate([
+            { $match: matchStage },
+            { $group: { _id: '$category', totalSpent: { $sum: '$amount' } } },
+            { $sort: { totalSpent: -1 } }
+        ]);
+
+        res.json(report);
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+
+// @desc    Get income by category report
+// @route   GET /api/reports/income-by-category
+// @access  Private
+exports.getIncomeByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        const report = await Income.aggregate([
+            { $match: matchStage },
+            { $group: { _id: '$category', totalReceived: { $sum: '$amount' } } },
+            { $sort: { totalReceived: -1 } }
+        ]);
+
+        res.json(report);
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+
+// @desc    Get net income/loss report for a period
+// @route   GET /api/reports/net-income
+// @access  Private
+exports.getNetIncomeReport = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { startDate, endDate } = parseDateRange(req.query.startDate, req.query.endDate);
+
+        const matchStage = {
+            user: mongoose.Types.ObjectId(userId)
+        };
+
+        if (startDate && endDate) {
+            matchStage.date = { $gte: startDate, $lte: endDate };
+        } else if (startDate) {
+            matchStage.date = { $gte: startDate };
+        } else if (endDate) {
+            matchStage.date = { $lte: endDate };
+        }
+
+        // Calculate total income for the period
+        const totalIncomeResult = await Income.aggregate([
+            { $match: matchStage },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalIncome = totalIncomeResult.length > 0 ? totalIncomeResult[0].total : 0;
+
+        // Calculate total expenses for the period
+        const totalExpenseResult = await Expense.aggregate([
+            { $match: matchStage },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalExpenses = totalExpenseResult.length > 0 ? totalExpenseResult[0].total : 0;
+
+        const netIncome = totalIncome - totalExpenses;
+
+        res.json({
+            startDate: startDate ? startDate.toISOString().split('T')[0] : null,
+            endDate: endDate ? endDate.toISOString().split('T')[0] : null,
+            totalIncome,
+            totalExpenses,
+            netIncome
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(400).json({ msg: err.message || 'Server Error' });
+    }
+};
+        |--authorize.js
+        // backend/middleware/authorize.js
+module.exports = (...roles) => { // 'roles' will be an array like ['admin', 'manager']
+    return (req, res, next) => {
+        // req.user will be available from the 'auth' middleware
+        if (!req.user || !roles.includes(req.user.role)) {
+            return res.status(403).json({ msg: 'Access denied: You do not have the required role' });
+        }
+        next();
+    };
+};
+	|--models
+        |--User.js
+        // backend/models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto'); // Import crypto module
+
+const UserSchema = new mongoose.Schema({
+    email: {
+        type: String,
+        required: true,
+        unique: true,
+        match: [/.+\@.+\..+/, 'Please fill a valid email address']
+    },
+    password: {
+        type: String,
+        required: true
+    },
+    role: {
+        type: String,
+        enum: ['regular', 'accountant', 'manager', 'admin'],
+        default: 'regular'
+    },
+    passwordResetToken: String,      // New field for reset token
+    passwordResetExpires: Date,      // New field for token expiration
+    createdAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+// Hash password before saving
+UserSchema.pre('save', async function(next) {
+    if (!this.isModified('password')) {
+        next();
+    }
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+});
+
+// Method to compare passwords
+UserSchema.methods.matchPassword = async function(enteredPassword) {
+    return await bcrypt.compare(enteredPassword, this.password);
+};
+
+// Method to generate password reset token
+UserSchema.methods.getResetPasswordToken = function() {
+    // Generate token
+    const resetToken = crypto.randomBytes(20).toString('hex');
+
+    // Hash token and set to passwordResetToken field
+    // Store hashed version in DB to compare with future request token
+    this.passwordResetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+    // Set expire
+    this.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+    return resetToken; // Return the unhashed token to send to the user
+};
+
+// Method to generate 2FA secret (for initial setup)
+UserSchema.methods.generateTwoFactorSecret = function() {
+    const secret = speakeasy.generateSecret({ length: 20, name: 'FinanceApp', issuer: 'YourAppName' });
+    this.twoFactorSecret = secret.base32; // Store the base32 secret
+    return secret; // Return full secret object (contains base32, otpauth_url)
+};
+
+
+module.exports = mongoose.model('User', UserSchema);
+        |--Income.js
+        // backend/models/Income.js
+const mongoose = require('mongoose');
+
+const IncomeSchema = new mongoose.Schema({
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User', // Reference to the User model
+        required: true
+    },
+    description: {
+        type: String,
+        required: [true, 'Income description is required'],
+        trim: true
+    },
+    amount: {
+        type: Number,
+        required: [true, 'Income amount is required'],
+        min: 0.01 // Ensures a positive amount
+    },
+    date: {
+        type: Date,
+        required: [true, 'Income date is required'],
+        default: Date.now // Default to current date if not provided
+    },
+    category: {
+        type: String,
+        required: [true, 'Income category is required'],
+        trim: true
+    },
+    notes: {
+        type: String,
+        trim: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+// Pre-save hook to update updatedAt timestamp
+IncomeSchema.pre('save', function(next) {
+    this.updatedAt = Date.now();
+    next();
+});
+
+module.exports = mongoose.model('Income', IncomeSchema);
+        |--Expense.js
+        // backend/models/Expense.js
+const mongoose = require('mongoose');
+
+const ExpenseSchema = new mongoose.Schema({
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User', // Reference to the User model
+        required: true
+    },
+    description: {
+        type: String,
+        required: [true, 'Expense description is required'],
+        trim: true
+    },
+    amount: {
+        type: Number,
+        required: [true, 'Expense amount is required'],
+        min: 0.01 // Ensures a positive amount
+    },
+    date: {
+        type: Date,
+        required: [true, 'Expense date is required'],
+        default: Date.now // Default to current date if not provided
+    },
+    category: {
+        type: String,
+        required: [true, 'Expense category is required'],
+        trim: true
+    },
+    // Optional: Reference to a specific budget (future integration)
+    // budget: {
+    //     type: mongoose.Schema.Types.ObjectId,
+    //     ref: 'Budget',
+    //     required: false // Not required for now, can be added later
+    // },
+    notes: {
+        type: String,
+        trim: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+// Pre-save hook to update updatedAt timestamp
+ExpenseSchema.pre('save', function(next) {
+    this.updatedAt = Date.now();
+    next();
+});
+
+
+module.exports = mongoose.model('Expense', ExpenseSchema);
+        |--Budget.js
+        // backend/models/Budget.js
+const mongoose = require('mongoose');
+
+const BudgetSchema = new mongoose.Schema({
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User', // Reference to the User model
+        required: true
+    },
+    name: {
+        type: String,
+        required: [true, 'Budget name is required'],
+        trim: true
+    },
+    period: {
+        type: String,
+        enum: ['monthly', 'quarterly', 'annually', 'custom'],
+        default: 'monthly'
+    },
+    startDate: {
+        type: Date,
+        required: [true, 'Start date is required']
+    },
+    endDate: {
+        type: Date,
+        required: [true, 'End date is required']
+    },
+    // Budget categories with allocated amounts
+    categories: [
+        {
+            name: {
+                type: String,
+                required: [true, 'Category name is required'],
+                trim: true
+            },
+            allocatedAmount: {
+                type: Number,
+                required: [true, 'Allocated amount is required'],
+                min: 0
+            },
+            // You might add a type here (e.g., 'income' or 'expense')
+            type: {
+                type: String,
+                enum: ['income', 'expense'],
+                default: 'expense' // Most categories will be expenses
+            }
+        }
+    ],
+    totalAllocatedAmount: { // Sum of all allocated amounts in categories
+        type: Number,
+        default: 0
+    },
+    description: {
+        type: String,
+        trim: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+// Pre-save hook to calculate totalAllocatedAmount
+BudgetSchema.pre('save', function(next) {
+    let total = 0;
+    this.categories.forEach(cat => {
+        if (cat.type === 'expense') {
+            total -= cat.allocatedAmount; // Expenses reduce the budget
+        } else if (cat.type === 'income') {
+            total += cat.allocatedAmount; // Income adds to the budget
+        }
+    });
+    this.totalAllocatedAmount = total;
+    this.updatedAt = Date.now();
+    next();
+});
+
+
+module.exports = mongoose.model('Budget', BudgetSchema);
+	|--node_modules
+        |......
+	|--routes
+        |--authRoutes.js
+        // backend/routes/authRoutes.js
+const express = require('express');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { check, validationResult } = require('express-validator');
+const crypto =require('crypto');
+const User = require('../models/User');
+const sendEmail = require('../utils/sendEmail');
+const authMiddleware = require('../middleware/auth');
+const speakeasy = require('speakeasy');
+const qrcode = require('qrcode');
+require('dotenv').config();
+
+// @route   POST api/auth/register
+// @desc    Register user
+// @access  Public
+router.post(
+    '/register',
+    [
+        check('email', 'Please include a valid email').isEmail(),
+        check('password', 'Password must be 6 or more characters').isLength({ min: 6 })
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { email, password } = req.body;
+
+        try {
+            let user = await User.findOne({ email });
+
+            if (user) {
+                return res.status(400).json({ msg: 'User already exists' });
+            }
+
+            user = new User({
+                email,
+                password // Password will be hashed by the pre-save hook in the User model
+            });
+
+            await user.save();
+
+            const payload = {
+                user: {
+                    id: user.id,
+                    role: user.role
+                }
+            };
+
+            jwt.sign(
+                payload,
+                process.env.JWT_SECRET,
+                { expiresIn: '1h' }, // Token expires in 1 hour
+                (err, token) => {
+                    if (err) throw err;
+                    res.json({ token });
+                }
+            );
+        } catch (err) {
+            console.error(err.message);
+            res.status(500).send('Server Error');
+        }
+    }
+);
+
+// @route   POST api/auth/login
+// @desc    Authenticate user & get token
+// @access  Public
+router.post(
+    '/login',
+    [
+        check('email', 'Please include a valid email').isEmail(),
+        check('password', 'Password is required').exists()
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { email, password } = req.body;
+
+        try {
+            let user = await User.findOne({ email });
+
+            if (!user) {
+                return res.status(400).json({ msg: 'Invalid Credentials' });
+            }
+
+            const isMatch = await user.matchPassword(password);
+
+            if (!isMatch) {
+                return res.status(400).json({ msg: 'Invalid Credentials' });
+            }
+
+            const payload = {
+                user: {
+                    id: user.id,
+                    role: user.role
+                }
+            };
+
+            jwt.sign(
+                payload,
+                process.env.JWT_SECRET,
+                { expiresIn: '1h' },
+                (err, token) => {
+                    if (err) throw err;
+                    res.json({ token });
+                }
+            );
+        } catch (err) {
+            console.error(err.message);
+            res.status(500).send('Server Error');
+        }
+    }
+);
+//Post api/auth/forgotpassword
+router.post('/forgotpassword',async(req,res)=>{
+    const { email } = req.body;
+    try{
+        const user = await User.findOne({ email });
+
+        if(!user){
+            return res.status(200).json({msg:'if an account with that email exists, a password reset link has been sent.'});
+        }
+        const resetToken=user.getResetPasswordToken();
+        await user.save();
+        const resetUrl=`${req.protocol}://${req.get('host')}/resetpassword/${resetToken}`;
+        const message = `<h1>You have requested a password reset</h1>
+                        <p>Please go to this link to reset your password:</p>
+                        <a href="${resetUrl}" Clicktracking="off">${resetUrl}</a>
+                        <p>This link is valid for 10 minutes.</p>
+                        <p>If you did not request this,please ignore this email. </p>
+                        `;
+        try{
+            await sendEmail({
+                email: user.email,
+                subject:'Password reset Request for Finance App',
+                message,
+            });
+            res.status(200).json({msg:'Passworw reset link sent to your email.'});
+        } catch (error){
+            user.passwordResetToken =undefined;
+            user.passwordResetExpires =undefined;
+            await user.save();
+            console.error(error);
+            return res.status(500).json({msg:'Email could not be sent. Server error.'});
+            }
+        }catch(err){
+            console.error(err.message);
+            res.status(500).send('Server Error');
+        }
+    }
+);
+
+// @route   PUT api/auth/resetpassword/:token
+// @desc    Reset user password
+// @access  Public
+router.put(
+    '/resetpassword/:resettoken',
+    [
+        check('password', 'Password must be 6 or more characters').isLength({ min: 6 }),
+        check('password2', 'Confirm password is required').exists(),
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { password, password2 } = req.body;
+        const resettoken = req.params.resettoken;
+
+        if (password !== password2) {
+            return res.status(400).json({ msg: 'Passwords do not match' });
+        }
+
+        // Hash incoming token to compare with the hashed token in DB
+        const resetPasswordTokenHashed = crypto.createHash('sha256').update(resettoken).digest('hex');
+
+        try {
+            const user = await User.findOne({
+                passwordResetToken: resetPasswordTokenHashed,
+                passwordResetExpires: { $gt: Date.now() } // Token must not be expired
+            });
+
+            if (!user) {
+                return res.status(400).json({ msg: 'Invalid or expired reset token' });
+            }
+
+            // Set new password (it will be hashed by pre-save hook)
+            user.password = password;
+            user.passwordResetToken = undefined; // Clear token fields
+            user.passwordResetExpires = undefined;
+
+            await user.save(); // Save user with new password and cleared token fields
+
+            res.status(200).json({ msg: 'Password reset successful. You can now log in with your new password.' });
+
+        } catch (err) {
+            console.error(err.message);
+            res.status(500).send('Server Error');
+        }
+    }
+);
+
+// Extend login route to handle 2FA
+// @route   POST api/auth/login
+// @desc    Authenticate user & get token (and handle 2FA)
+// @access  Public
+router.post(
+    '/login',
+    [
+        check('email', 'Please include a valid email').isEmail(),
+        check('password', 'Password is required').exists()
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { email, password, twoFactorCode } = req.body; // Added twoFactorCode
+
+        try {
+            let user = await User.findOne({ email });
+
+            if (!user) {
+                return res.status(400).json({ msg: 'Invalid Credentials' });
+            }
+
+            const isMatch = await user.matchPassword(password);
+
+            if (!isMatch) {
+                return res.status(400).json({ msg: 'Invalid Credentials' });
+            }
+
+            // --- 2FA Logic ---
+            if (user.isTwoFactorEnabled) {
+                if (!twoFactorCode) {
+                    // User needs to provide 2FA code
+                    return res.status(400).json({ msg: 'Two-factor authentication is enabled. Please provide your 2FA code.', twoFactorRequired: true });
+                }
+
+                const verified = speakeasy.totp.verify({
+                    secret: user.twoFactorSecret,
+                    encoding: 'base32',
+                    token: twoFactorCode,
+                    window: 1 // Allows for codes generated 30 seconds before or after current time
+                });
+
+                if (!verified) {
+                    return res.status(401).json({ msg: 'Invalid 2FA code' });
+                }
+            }
+            // --- End 2FA Logic ---
+
+            const payload = {
+                user: {
+                    id: user.id,
+                    role: user.role
+                }
+            };
+
+            jwt.sign(
+                payload,
+                process.env.JWT_SECRET,
+                { expiresIn: '1h' },
+                (err, token) => {
+                    if (err) throw err;
+                    res.json({ token, isTwoFactorEnabled: user.isTwoFactorEnabled }); // Send 2FA status
+                }
+            );
+        } catch (err) {
+            console.error(err.message);
+            res.status(500).send('Server Error');
+        }
+    }
+);
+
+// @route   POST api/auth/2fa/generate-secret
+// @desc    Generate 2FA secret and QR code for user
+// @access  Private (requires authentication)
+router.post('/2fa/generate-secret', authMiddleware, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+
+        if (!user) {
+            return res.status(404).json({ msg: 'User not found' });
+        }
+        if (user.isTwoFactorEnabled) {
+            return res.status(400).json({ msg: 'Two-factor authentication is already enabled for this user.' });
+        }
+
+        const secret = user.generateTwoFactorSecret(); // Generates and saves secret to user model
+        await user.save();
+
+        qrcode.toDataURL(secret.otpauth_url, (err, data_url) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).json({ msg: 'Error generating QR code' });
+            }
+            res.json({
+                secret: secret.base32,
+                qrCodeUrl: data_url,
+                otpauthUrl: secret.otpauth_url
+            });
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   POST api/auth/2fa/verify-setup
+// @desc    Verify 2FA code during initial setup and enable 2FA
+// @access  Private (requires authentication)
+router.post('/2fa/verify-setup', authMiddleware, async (req, res) => {
+    const { token } = req.body; // The 2FA code from authenticator app
+
+    try {
+        const user = await User.findById(req.user.id);
+
+        if (!user) {
+            return res.status(404).json({ msg: 'User not found' });
+        }
+        if (user.isTwoFactorEnabled) {
+            return res.status(400).json({ msg: 'Two-factor authentication is already enabled.' });
+        }
+        if (!user.twoFactorSecret) {
+            return res.status(400).json({ msg: '2FA setup not initiated. Generate a secret first.' });
+        }
+
+        const verified = speakeasy.totp.verify({
+            secret: user.twoFactorSecret,
+            encoding: 'base32',
+            token: token,
+            window: 1 // Allows for codes generated 30 seconds before or after current time
+        });
+
+        if (verified) {
+            user.isTwoFactorEnabled = true;
+            await user.save();
+            res.json({ msg: 'Two-factor authentication successfully enabled!' });
+        } else {
+            res.status(400).json({ msg: 'Invalid 2FA code. Please try again.' });
+        }
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   POST api/auth/2fa/disable
+// @desc    Disable 2FA for a user (requires authentication and potentially current password)
+// @access  Private (requires authentication)
+router.post('/2fa/disable', authMiddleware, async (req, res) => {
+    // For disabling, you might want to require the current password as well for security
+    const { password } = req.body;
+
+    try {
+        const user = await User.findById(req.user.id);
+
+        if (!user) {
+            return res.status(404).json({ msg: 'User not found' });
+        }
+        if (!user.isTwoFactorEnabled) {
+            return res.status(400).json({ msg: 'Two-factor authentication is not currently enabled.' });
+        }
+
+        // Optional: Verify user's password before disabling 2FA
+        const isMatch = await user.matchPassword(password);
+        if (!isMatch) {
+            return res.status(401).json({ msg: 'Incorrect password. Cannot disable 2FA.' });
+        }
+
+        user.isTwoFactorEnabled = false;
+        user.twoFactorSecret = undefined; // Clear the secret for security
+        await user.save();
+
+        res.json({ msg: 'Two-factor authentication successfully disabled!' });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+
+module.exports = router;
+        |--budgetRoutes.js
+        // backend/routes/budgetRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Our authentication middleware
+const budgetController = require('../controllers/budgetController'); // Import the controller
+
+// @route   GET api/budgets
+// @desc    Get all budgets for the authenticated user
+// @access  Private
+router.get('/', auth, budgetController.getBudgets);
+
+// @route   GET api/budgets/:id
+// @desc    Get single budget by ID for the authenticated user
+// @access  Private
+router.get('/:id', auth, budgetController.getBudgetById);
+
+// @route   POST api/budgets
+// @desc    Create a new budget
+// @access  Private
+router.post('/', auth, budgetController.createBudget);
+
+// @route   PUT api/budgets/:id
+// @desc    Update an existing budget
+// @access  Private
+router.put('/:id', auth, budgetController.updateBudget);
+
+// @route   DELETE api/budgets/:id
+// @desc    Delete a budget
+// @access  Private
+router.delete('/:id', auth, budgetController.deleteBudget);
+
+module.exports = router;
+        |--dashboardRoutes.js
+        // backend/routes/dashboardRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Our authentication middleware
+const dashboardController = require('../controllers/dashboardController'); // Import the controller
+
+// @route   GET api/dashboard/summary
+// @desc    Get summary data for the dashboard
+// @access  Private
+router.get('/summary', auth, dashboardController.getDashboardSummary);
+
+// @route   GET /api/dashboard/reports/expenses-by-category
+// @desc    Get expenses by category for a given period
+// @access  Private
+router.get('/reports/expenses-by-category', auth, dashboardController.getExpensesByCategory);
+
+// @route   GET /api/dashboard/reports/income-by-category
+// @desc    Get income by category for a given period
+// @access  Private
+router.get('/reports/income-by-category', auth, dashboardController.getIncomeByCategory);
+
+// @route   GET /api/dashboard/reports/transaction-trends
+// @desc    Get daily/monthly/yearly transaction totals for a given period (trend data)
+// @access  Private
+router.get('/reports/transaction-trends', auth, dashboardController.getTransactionTrends);
+
+module.exports = router;
+        |--expenseRoutes.js
+        // backend/routes/expenseRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Our authentication middleware
+const expenseController = require('../controllers/expenseController'); // Import the controller
+const { check } = require('express-validator'); // For input validation (optional but good practice)
+
+// @route   GET api/expenses
+// @desc    Get all expenses for the authenticated user
+// @access  Private
+router.get('/', auth, expenseController.getExpenses);
+
+// @route   GET api/expenses/:id
+// @desc    Get single expense by ID for the authenticated user
+// @access  Private
+router.get('/:id', auth, expenseController.getExpenseById);
+
+// @route   POST api/expenses
+// @desc    Create a new expense
+// @access  Private
+router.post(
+    '/',
+    [
+        auth,
+        [
+            check('description', 'Description is required').not().isEmpty(),
+            check('amount', 'Amount is required and must be a positive number').isFloat({ gt: 0 }),
+            check('date', 'Date is required').isISO8601().toDate(), // Validates date format
+            check('category', 'Category is required').not().isEmpty()
+        ]
+    ],
+    expenseController.createExpense
+);
+
+// @route   PUT api/expenses/:id
+// @desc    Update an existing expense
+// @access  Private
+router.put(
+    '/:id',
+    [
+        auth,
+        [
+            // Optional: Add validation for updates too, similar to create
+            // For now, we'll let the controller handle missing fields gracefully
+        ]
+    ],
+    expenseController.updateExpense
+);
+
+// @route   DELETE api/expenses/:id
+// @desc    Delete an expense
+// @access  Private
+router.delete('/:id', auth, expenseController.deleteExpense);
+
+module.exports = router;
+        |--incomeRoutes.js
+        // backend/routes/incomeRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Our authentication middleware
+const incomeController = require('../controllers/incomeController'); // Import the controller
+const { check } = require('express-validator'); // For input validation
+
+// @route   GET api/income
+// @desc    Get all income entries for the authenticated user
+// @access  Private
+router.get('/', auth, incomeController.getIncome);
+
+// @route   GET api/income/:id
+// @desc    Get single income entry by ID for the authenticated user
+// @access  Private
+router.get('/:id', auth, incomeController.getIncomeById);
+
+// @route   POST api/income
+// @desc    Create a new income entry
+// @access  Private
+router.post(
+    '/',
+    [
+        auth,
+        [
+            check('description', 'Description is required').not().isEmpty(),
+            check('amount', 'Amount is required and must be a positive number').isFloat({ gt: 0 }),
+            check('date', 'Date is required').isISO8601().toDate(), // Validates date format
+            check('category', 'Category is required').not().isEmpty()
+        ]
+    ],
+    incomeController.createIncome
+);
+
+// @route   PUT api/income/:id
+// @desc    Update an existing income entry
+// @access  Private
+router.put(
+    '/:id',
+    [
+        auth,
+        // Add validation for updates here if needed, similar to create
+    ],
+    incomeController.updateIncome
+);
+
+// @route   DELETE api/income/:id
+// @desc    Delete an income entry
+// @access  Private
+router.delete('/:id', auth, incomeController.deleteIncome);
+
+module.exports = router;
+        |--reportRoutes.js
+        // backend/routes/reportRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Our authentication middleware
+const reportController = require('../controllers/reportController'); // Import the controller
+
+// @route   GET /api/reports/spending-by-category
+// @desc    Get spending by category report for a given period
+// @access  Private
+// Query Params: startDate (YYYY-MM-DD), endDate (YYYY-MM-DD)
+router.get('/spending-by-category', auth, reportController.getSpendingByCategory);
+
+// @route   GET /api/reports/income-by-category
+// @desc    Get income by category report for a given period
+// @access  Private
+// Query Params: startDate (YYYY-MM-DD), endDate (YYYY-MM-DD)
+router.get('/income-by-category', auth, reportController.getIncomeByCategory);
+
+// @route   GET /api/reports/net-income
+// @desc    Get net income/loss report for a given period
+// @access  Private
+// Query Params: startDate (YYYY-MM-DD), endDate (YYYY-MM-DD)
+router.get('/net-income', auth, reportController.getNetIncomeReport);
+
+module.exports = router;
+	|--utils
+        |--sendEmail.js
+        // backend/utils/sendEmail.js
+const nodemailer = require('nodemailer');
+require('dotenv').config();
+
+const sendEmail = async (options) => {
+    const transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT,
+        secure: process.env.EMAIL_PORT == 465, // true for 465, false for other ports
+        auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
+        },
+    });
+
+    const mailOptions = {
+        from: `Finance App <${process.env.EMAIL_USER}>`, // Sender address
+        to: options.email,        // List of receivers
+        subject: options.subject, // Subject line
+        html: options.message,    // html body
+    };
+
+    try {
+        await transporter.sendMail(mailOptions);
+        console.log('Email sent successfully!');
+    } catch (error) {
+        console.error('Error sending email:', error);
+        // You might want to throw the error or handle it more gracefully
+    }
+};
+
+module.exports = sendEmail;
+	|--.env
+    MONGO_URI=mongodb+srv://debnathsanjoy2004:QP9Cv8qgVs4GMe4n@cluster0.g0ozo1t.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+JWT_SECRET=zxawsr,<><?>?:,./_+-9098!@$$%^&*fsaawerfghffdfcgfcfgcgfdcxtdstdxyyufcvufyuduyctfustdcyfdtfdyckjbjhctufdxyxddrdygdxtfdygfcjyvygcxttctfstcvujbbcvfydsxutrdxryeds6rc
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USER=debnathsanjoy2004@gmail.com
+EMAIL_PASS=Sanjoy1@??
+
+PORT=3000
+	|--package.json
+    {
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.15.1",
+    "nodemailer": "^7.0.3",
+    "qrcode": "^1.5.4",
+    "speakeasy": "^2.0.0"
+  }
+}
+
+	|--server.js
+    // backend/server.js
+const express = require('express');
+const connectDB = require('./config/db');
+const authRoutes = require('./routes/authRoutes');
+const budgetRoutes = require('./routes/budgetRoutes');
+const expenseRoutes = require('./routes/expenseRoutes');
+const incomeRoutes = require('./routes/incomeRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
+const reportRoutes = require('./routes/reportRoutes');
+
+const authMiddleware = require('./middleware/auth');
+const authorize = require('./middleware/authorize');
+const cors = require('cors');
+
+const app = express();
+
+
+connectDB();
+
+// Init Middleware
+app.use(express.json({ extended: false })); // Allows us to get data in req.body
+app.use(cors()); // Enable CORS
+
+// Define Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/budgets',budgetRoutes);
+app.use('/api/expenses',expenseRoutes);
+app.use('/api/income',incomeRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/reports', reportRoutes);
+
+app.get('/api/protected',authMiddleware,(req,res)=>{
+	res.json({msg:`Welcome,user${req.user.id}! this is protected route.your role is ${res.user.role}`})
+});
+app.get('/api/admin-only',authMiddleware,authorize('admin'),(req,res)=>{
+	res.json({msg:`Wlcome,Admin ${req.user.id}!you have access to admin content.`});
+});
+app.get('/api/accountant-manager-only',authMiddleware,authorize('accountant','manager','admin'),(req,res)=>{
+	res.json({msg:`Welcome,${req.user.role}! you have access to accounting/manager content.`});
+});
+
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+|--frontend
+    |--node_modules
+        |........
+    |--public
+    |--src
+        |--assets
+        |--components
+            |--AccountantDashboard.jsx
+            // frontend/src/components/AccountantDashboard.jsx
+import React from 'react';
+import { Container, Card } from 'react-bootstrap';
+
+const AccountantDashboard = () => {
+    return (
+        <Container className="mt-5">
+            <Card>
+                <Card.Body>
+                    <h1 className="text-center">Accounting & Management Dashboard</h1>
+                    <p className="lead text-center">Welcome! Here you can manage financial records and reports.</p>
+                    {/* Add accountant/manager-specific content here */}
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default AccountantDashboard;
+            |--AdminDashboard.jsx
+            // frontend/src/components/AdminDashboard.jsx
+import React from 'react';
+import { Container, Card } from 'react-bootstrap';
+
+const AdminDashboard = () => {
+    return (
+        <Container className="mt-5">
+            <Card>
+                <Card.Body>
+                    <h1 className="text-center">Admin Dashboard</h1>
+                    <p className="lead text-center">Welcome, Admin! This area is for administrative tasks.</p>
+                    {/* Add admin-specific content here */}
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default AdminDashboard;
+            |--BudgetManager.jsx
+            // frontend/src/components/BudgetManager.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Container, Card, Button, Form, Alert, Row, Col, ListGroup } from 'react-bootstrap';
+import { FaEdit, FaTrashAlt, FaPlusCircle } from 'react-icons/fa'; // For icons (npm install react-icons)
+
+const BudgetManager = () => {
+    const [budgets, setBudgets] = useState([]);
+    const [formData, setFormData] = useState({
+        name: '',
+        period: 'monthly',
+        startDate: '',
+        endDate: '',
+        categories: [{ name: '', allocatedAmount: 0, type: 'expense' }],
+        description: ''
+    });
+    const [editMode, setEditMode] = useState(false);
+    const [currentBudgetId, setCurrentBudgetId] = useState(null);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const { name, period, startDate, endDate, categories, description } = formData;
+
+    useEffect(() => {
+        fetchBudgets();
+    }, []);
+
+    const fetchBudgets = async () => {
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token }
+            };
+            const res = await axios.get('/api/budgets', config);
+            setBudgets(res.data);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch budgets.');
+            console.error(err);
+        }
+    };
+
+    const onChange = e => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+    const onCategoryChange = (index, e) => {
+        const newCategories = [...categories];
+        newCategories[index][e.target.name] = e.target.value;
+        setFormData({ ...formData, categories: newCategories });
+    };
+
+    const addCategoryField = () => {
+        setFormData({
+            ...formData,
+            categories: [...categories, { name: '', allocatedAmount: 0, type: 'expense' }]
+        });
+    };
+
+    const removeCategoryField = (index) => {
+        const newCategories = categories.filter((_, i) => i !== index);
+        setFormData({ ...formData, categories: newCategories });
+    };
+
+    const onSubmit = async e => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+
+            if (editMode) {
+                await axios.put(`/api/budgets/${currentBudgetId}`, formData, config);
+                setMessage('Budget updated successfully!');
+            } else {
+                await axios.post('/api/budgets', formData, config);
+                setMessage('Budget created successfully!');
+            }
+            resetForm();
+            fetchBudgets(); // Refresh the list
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Error saving budget.');
+            console.error(err);
+        }
+    };
+
+    const onEdit = (budget) => {
+        setFormData({
+            name: budget.name,
+            period: budget.period,
+            startDate: budget.startDate.split('T')[0], // Format date for input
+            endDate: budget.endDate.split('T')[0],   // Format date for input
+            categories: budget.categories,
+            description: budget.description
+        });
+        setEditMode(true);
+        setCurrentBudgetId(budget._id);
+        setMessage('');
+        setError('');
+    };
+
+    const onDelete = async (id) => {
+        if (window.confirm('Are you sure you want to delete this budget?')) {
+            setError('');
+            setMessage('');
+            try {
+                const token = localStorage.getItem('token');
+                const config = {
+                    headers: { 'x-auth-token': token }
+                };
+                await axios.delete(`/api/budgets/${id}`, config);
+                setMessage('Budget deleted successfully!');
+                fetchBudgets();
+            } catch (err) {
+                setError(err.response?.data?.msg || 'Failed to delete budget.');
+                console.error(err);
+            }
+        }
+    };
+
+    const resetForm = () => {
+        setFormData({
+            name: '',
+            period: 'monthly',
+            startDate: '',
+            endDate: '',
+            categories: [{ name: '', allocatedAmount: 0, type: 'expense' }],
+            description: ''
+        });
+        setEditMode(false);
+        setCurrentBudgetId(null);
+    };
+
+    return (
+        <Container className="mt-5">
+            <Card className="mb-4">
+                <Card.Body>
+                    <h2 className="text-center mb-4">{editMode ? 'Edit Budget' : 'Create New Budget'}</h2>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={onSubmit}>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="budgetName">
+                                    <Form.Label>Budget Name</Form.Label>
+                                    <Form.Control
+                                        type="text"
+                                        placeholder="e.g., Monthly Household Budget"
+                                        name="name"
+                                        value={name}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="budgetPeriod">
+                                    <Form.Label>Period</Form.Label>
+                                    <Form.Select name="period" value={period} onChange={onChange} required>
+                                        <option value="monthly">Monthly</option>
+                                        <option value="quarterly">Quarterly</option>
+                                        <option value="annually">Annually</option>
+                                        <option value="custom">Custom</option>
+                                    </Form.Select>
+                                </Form.Group>
+                            </Col>
+                        </Row>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="budgetStartDate">
+                                    <Form.Label>Start Date</Form.Label>
+                                    <Form.Control
+                                        type="date"
+                                        name="startDate"
+                                        value={startDate}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="budgetEndDate">
+                                    <Form.Label>End Date</Form.Label>
+                                    <Form.Control
+                                        type="date"
+                                        name="endDate"
+                                        value={endDate}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+
+                        <h4 className="mt-4 mb-3">Categories</h4>
+                        {categories.map((cat, index) => (
+                            <Row key={index} className="mb-2 align-items-end">
+                                <Col md={4}>
+                                    <Form.Group controlId={`categoryName-${index}`}>
+                                        <Form.Label>Category Name</Form.Label>
+                                        <Form.Control
+                                            type="text"
+                                            placeholder="e.g., Groceries, Salary"
+                                            name="name"
+                                            value={cat.name}
+                                            onChange={e => onCategoryChange(index, e)}
+                                            required
+                                        />
+                                    </Form.Group>
+                                </Col>
+                                <Col md={3}>
+                                    <Form.Group controlId={`categoryAmount-${index}`}>
+                                        <Form.Label>Amount</Form.Label>
+                                        <Form.Control
+                                            type="number"
+                                            placeholder="0"
+                                            name="allocatedAmount"
+                                            value={cat.allocatedAmount}
+                                            onChange={e => onCategoryChange(index, e)}
+                                            min="0"
+                                            required
+                                        />
+                                    </Form.Group>
+                                </Col>
+                                <Col md={3}>
+                                    <Form.Group controlId={`categoryType-${index}`}>
+                                        <Form.Label>Type</Form.Label>
+                                        <Form.Select name="type" value={cat.type} onChange={e => onCategoryChange(index, e)} required>
+                                            <option value="expense">Expense</option>
+                                            <option value="income">Income</option>
+                                        </Form.Select>
+                                    </Form.Group>
+                                </Col>
+                                <Col md={2} className="d-flex align-items-end">
+                                    {categories.length > 1 && (
+                                        <Button variant="danger" onClick={() => removeCategoryField(index)} className="w-100">
+                                            <FaTrashAlt />
+                                        </Button>
+                                    )}
+                                </Col>
+                            </Row>
+                        ))}
+                        <Button variant="outline-primary" onClick={addCategoryField} className="mt-2 mb-4">
+                            <FaPlusCircle className="me-2" /> Add Category
+                        </Button>
+
+                        <Form.Group className="mb-3" controlId="budgetDescription">
+                            <Form.Label>Description (Optional)</Form.Label>
+                            <Form.Control
+                                as="textarea"
+                                rows={3}
+                                placeholder="A brief description of this budget"
+                                name="description"
+                                value={description}
+                                onChange={onChange}
+                            />
+                        </Form.Group>
+
+                        <div className="d-grid gap-2">
+                            <Button variant="success" type="submit">
+                                {editMode ? 'Update Budget' : 'Create Budget'}
+                            </Button>
+                            {editMode && (
+                                <Button variant="secondary" onClick={resetForm}>
+                                    Cancel Edit
+                                </Button>
+                            )}
+                        </div>
+                    </Form>
+                </Card.Body>
+            </Card>
+
+            <h2 className="mt-5 mb-4 text-center">My Budgets</h2>
+            {budgets.length === 0 ? (
+                <Alert variant="info" className="text-center">No budgets found. Start by creating one!</Alert>
+            ) : (
+                <Row xs={1} md={2} lg={3} className="g-4">
+                    {budgets.map(budget => (
+                        <Col key={budget._id}>
+                            <Card>
+                                <Card.Body>
+                                    <Card.Title>{budget.name} ({budget.period})</Card.Title>
+                                    <Card.Subtitle className="mb-2 text-muted">
+                                        {new Date(budget.startDate).toLocaleDateString()} - {new Date(budget.endDate).toLocaleDateString()}
+                                    </Card.Subtitle>
+                                    <Card.Text>
+                                        <strong>Total Allocated:</strong> ${budget.totalAllocatedAmount.toFixed(2)}
+                                        {budget.description && <p className="mt-2">{budget.description}</p>}
+                                    </Card.Text>
+                                    <h6 className="mt-3">Categories:</h6>
+                                    <ListGroup variant="flush">
+                                        {budget.categories.map((cat, idx) => (
+                                            <ListGroup.Item key={idx} className="d-flex justify-content-between align-items-center">
+                                                {cat.name}
+                                                <span className={`badge ${cat.type === 'income' ? 'bg-success' : 'bg-danger'}`}>
+                                                    {cat.type === 'income' ? '+' : '-'}${cat.allocatedAmount.toFixed(2)}
+                                                </span>
+                                            </ListGroup.Item>
+                                        ))}
+                                    </ListGroup>
+                                    <div className="d-flex justify-content-end mt-3">
+                                        <Button variant="info" size="sm" className="me-2" onClick={() => onEdit(budget)}>
+                                            <FaEdit /> Edit
+                                        </Button>
+                                        <Button variant="danger" size="sm" onClick={() => onDelete(budget._id)}>
+                                            <FaTrashAlt /> Delete
+                                        </Button>
+                                    </div>
+                                </Card.Body>
+                            </Card>
+                        </Col>
+                    ))}
+                </Row>
+            )}
+        </Container>
+    );
+};
+
+export default BudgetManager;
+            |--Dashboard.jsx
+            // frontend/src/components/Dashboard.jsx
+import React, { useState, useEffect } from 'react';
+import { Container, Row, Col, Card, Alert, Spinner, ListGroup } from 'react-bootstrap';
+import axios from 'axios';
+
+const Dashboard = () => {
+    const [dashboardData, setDashboardData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        fetchDashboardSummary();
+    }, []);
+
+    const fetchDashboardSummary = async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token }
+            };
+            const res = await axios.get('/api/dashboard/summary', config);
+            setDashboardData(res.data);
+            setLoading(false);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch dashboard data.');
+            setLoading(false);
+            console.error(err);
+        }
+    };
+
+    if (loading) {
+        return (
+            <Container className="text-center mt-5">
+                <Spinner animation="border" role="status">
+                    <span className="visually-hidden">Loading...</span>
+                </Spinner>
+                <p className="mt-3">Loading your financial overview...</p>
+            </Container>
+        );
+    }
+
+    if (error) {
+        return (
+            <Container className="mt-5">
+                <Alert variant="danger">{error}</Alert>
+            </Container>
+        );
+    }
+
+    const { totalIncome, totalExpenses, currentMonthBalance, budgetVsActual, recentTransactions } = dashboardData;
+
+    return (
+        <Container className="mt-5">
+            <h1 className="text-center mb-4">Your Financial Overview</h1>
+
+            <Row className="mb-4">
+                <Col md={4}>
+                    <Card className="text-center bg-success text-white">
+                        <Card.Body>
+                            <Card.Title>Total Income (This Month)</Card.Title>
+                            <Card.Text as="h3">${totalIncome.toFixed(2)}</Card.Text>
+                        </Card.Body>
+                    </Card>
+                </Col>
+                <Col md={4}>
+                    <Card className="text-center bg-danger text-white">
+                        <Card.Body>
+                            <Card.Title>Total Expenses (This Month)</Card.Title>
+                            <Card.Text as="h3">${totalExpenses.toFixed(2)}</Card.Text>
+                        </Card.Body>
+                    </Card>
+                </Col>
+                <Col md={4}>
+                    <Card className="text-center bg-primary text-white">
+                        <Card.Body>
+                            <Card.Title>Current Month Balance</Card.Title>
+                            <Card.Text as="h3">${currentMonthBalance.toFixed(2)}</Card.Text>
+                        </Card.Body>
+                    </Card>
+                </Col>
+            </Row>
+
+            {budgetVsActual ? (
+                <Card className="mb-4">
+                    <Card.Body>
+                        <Card.Title>Budget vs. Actual Spending ({budgetVsActual.budgetName})</Card.Title>
+                        <Card.Subtitle className="mb-3 text-muted">
+                            {new Date(budgetVsActual.budgetStartDate).toLocaleDateString()} - {new Date(budgetVsActual.budgetEndDate).toLocaleDateString()}
+                        </Card.Subtitle>
+                        <Row>
+                            <Col md={6}>
+                                <h5 className="text-info">Budgeted Expenses: ${budgetVsActual.totalBudgetedExpenses.toFixed(2)}</h5>
+                            </Col>
+                            <Col md={6}>
+                                <h5 className="text-danger">Actual Expenses: ${budgetVsActual.totalActualExpenses.toFixed(2)}</h5>
+                            </Col>
+                        </Row>
+                        <Alert variant={budgetVsActual.remainingBudget >= 0 ? 'success' : 'danger'} className="mt-3">
+                            Remaining Budget: ${budgetVsActual.remainingBudget.toFixed(2)}
+                        </Alert>
+
+                        <h6 className="mt-4">Category Breakdown:</h6>
+                        <ListGroup>
+                            {budgetVsActual.categoryBreakdown.map((item, index) => (
+                                <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
+                                    {item.category}
+                                    <div>
+                                        <span className="badge bg-info me-2">Budgeted: ${item.budgeted.toFixed(2)}</span>
+                                        <span className="badge bg-danger me-2">Spent: ${item.spent.toFixed(2)}</span>
+                                        <span className={`badge ${item.remaining >= 0 ? 'bg-success' : 'bg-warning text-dark'}`}>Remaining: ${item.remaining.toFixed(2)}</span>
+                                    </div>
+                                </ListGroup.Item>
+                            ))}
+                        </ListGroup>
+                    </Card.Body>
+                </Card>
+            ) : (
+                <Alert variant="info" className="text-center">
+                    No active monthly budget found for the current period. Create one in the "Budgets" section to see your spending compared to your plan!
+                </Alert>
+            )}
+
+            <Card className="mb-4">
+                <Card.Body>
+                    <Card.Title>Recent Transactions</Card.Title>
+                    {recentTransactions.length === 0 ? (
+                        <Alert variant="secondary">No recent transactions to display.</Alert>
+                    ) : (
+                        <ListGroup>
+                            {recentTransactions.map(transaction => (
+                                <ListGroup.Item key={transaction._id} className="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>{transaction.description}</strong>
+                                        <span className="text-muted ms-2">({transaction.category})</span>
+                                        <br />
+                                        <small>{new Date(transaction.date).toLocaleDateString()}</small>
+                                    </div>
+                                    <h5 className={transaction.amount > 0 ? (transaction.type === 'income' ? 'text-success' : 'text-danger') : 'text-secondary'}>
+                                        {transaction.type === 'income' ? '+' : '-'}
+                                        ${transaction.amount.toFixed(2)}
+                                    </h5>
+                                </ListGroup.Item>
+                            ))}
+                        </ListGroup>
+                    )}
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default Dashboard;
+            |--ExpenseManager.jsx
+            // frontend/src/components/ExpenseManager.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Container, Card, Button, Form, Alert, Row, Col, ListGroup } from 'react-bootstrap';
+import { FaEdit, FaTrashAlt, FaPlusCircle } from 'react-icons/fa'; // Ensure react-icons is installed
+
+const ExpenseManager = () => {
+    const [expenses, setExpenses] = useState([]);
+    const [formData, setFormData] = useState({
+        description: '',
+        amount: '',
+        date: '',
+        category: '',
+        notes: ''
+    });
+    const [editMode, setEditMode] = useState(false);
+    const [currentExpenseId, setCurrentExpenseId] = useState(null);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const { description, amount, date, category, notes } = formData;
+
+    useEffect(() => {
+        fetchExpenses();
+    }, []);
+
+    const fetchExpenses = async () => {
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token }
+            };
+            const res = await axios.get('/api/expenses', config);
+            setExpenses(res.data);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch expenses.');
+            console.error(err);
+        }
+    };
+
+    const onChange = e => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+    const onSubmit = async e => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+
+            if (editMode) {
+                await axios.put(`/api/expenses/${currentExpenseId}`, formData, config);
+                setMessage('Expense updated successfully!');
+            } else {
+                await axios.post('/api/expenses', formData, config);
+                setMessage('Expense created successfully!');
+            }
+            resetForm();
+            fetchExpenses(); // Refresh the list
+        } catch (err) {
+            setError(err.response?.data?.msg || err.response?.data?.errors?.[0]?.msg || 'Error saving expense.');
+            console.error(err);
+        }
+    };
+
+    const onEdit = (expense) => {
+        setFormData({
+            description: expense.description,
+            amount: expense.amount,
+            date: expense.date.split('T')[0], // Format date for input
+            category: expense.category,
+            notes: expense.notes
+        });
+        setEditMode(true);
+        setCurrentExpenseId(expense._id);
+        setMessage('');
+        setError('');
+    };
+
+    const onDelete = async (id) => {
+        if (window.confirm('Are you sure you want to delete this expense?')) {
+            setError('');
+            setMessage('');
+            try {
+                const token = localStorage.getItem('token');
+                const config = {
+                    headers: { 'x-auth-token': token }
+                };
+                await axios.delete(`/api/expenses/${id}`, config);
+                setMessage('Expense deleted successfully!');
+                fetchExpenses();
+            } catch (err) {
+                setError(err.response?.data?.msg || 'Failed to delete expense.');
+                console.error(err);
+            }
+        }
+    };
+
+    const resetForm = () => {
+        setFormData({
+            description: '',
+            amount: '',
+            date: '',
+            category: '',
+            notes: ''
+        });
+        setEditMode(false);
+        setCurrentExpenseId(null);
+    };
+
+    return (
+        <Container className="mt-5">
+            <Card className="mb-4">
+                <Card.Body>
+                    <h2 className="text-center mb-4">{editMode ? 'Edit Expense' : 'Add New Expense'}</h2>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={onSubmit}>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="expenseDescription">
+                                    <Form.Label>Description</Form.Label>
+                                    <Form.Control
+                                        type="text"
+                                        placeholder="e.g., Groceries, Dinner with friends"
+                                        name="description"
+                                        value={description}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="expenseAmount">
+                                    <Form.Label>Amount ($)</Form.Label>
+                                    <Form.Control
+                                        type="number"
+                                        step="0.01"
+                                        placeholder="0.00"
+                                        name="amount"
+                                        value={amount}
+                                        onChange={onChange}
+                                        min="0.01"
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="expenseDate">
+                                    <Form.Label>Date</Form.Label>
+                                    <Form.Control
+                                        type="date"
+                                        name="date"
+                                        value={date}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="expenseCategory">
+                                    <Form.Label>Category</Form.Label>
+                                    <Form.Control
+                                        type="text"
+                                        placeholder="e.g., Food, Transport, Utilities"
+                                        name="category"
+                                        value={category}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+                        <Form.Group className="mb-3" controlId="expenseNotes">
+                            <Form.Label>Notes (Optional)</Form.Label>
+                            <Form.Control
+                                as="textarea"
+                                rows={3}
+                                placeholder="Any additional details"
+                                name="notes"
+                                value={notes}
+                                onChange={onChange}
+                            />
+                        </Form.Group>
+
+                        <div className="d-grid gap-2">
+                            <Button variant="success" type="submit">
+                                {editMode ? 'Update Expense' : 'Add Expense'}
+                            </Button>
+                            {editMode && (
+                                <Button variant="secondary" onClick={resetForm}>
+                                    Cancel Edit
+                                </Button>
+                            )}
+                        </div>
+                    </Form>
+                </Card.Body>
+            </Card>
+
+            <h2 className="mt-5 mb-4 text-center">My Expenses</h2>
+            {expenses.length === 0 ? (
+                <Alert variant="info" className="text-center">No expenses recorded. Start by adding one!</Alert>
+            ) : (
+                <ListGroup className="mb-4">
+                    {expenses.map(expense => (
+                        <ListGroup.Item key={expense._id} className="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h5>{expense.description} <span className="badge bg-secondary">{expense.category}</span></h5>
+                                <p className="mb-1 text-muted">
+                                    {new Date(expense.date).toLocaleDateString()}
+                                    {expense.notes && ` | Notes: ${expense.notes}`}
+                                </p>
+                            </div>
+                            <div className="text-end">
+                                <h4 className="text-danger mb-1">${expense.amount.toFixed(2)}</h4>
+                                <div>
+                                    <Button variant="info" size="sm" className="me-2" onClick={() => onEdit(expense)}>
+                                        <FaEdit />
+                                    </Button>
+                                    <Button variant="danger" size="sm" onClick={() => onDelete(expense._id)}>
+                                        <FaTrashAlt />
+                                    </Button>
+                                </div>
+                            </div>
+                        </ListGroup.Item>
+                    ))}
+                </ListGroup>
+            )}
+        </Container>
+    );
+};
+
+export default ExpenseManager;
+            |--ForgotPassword.jsx
+            // frontend/src/components/ForgotPassword.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { Form, Button, Container, Card, Alert } from 'react-bootstrap';
+
+const ForgotPassword = () => {
+    const [email, setEmail] = useState('');
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const onSubmit = async (e) => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+
+        try {
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            };
+            const body = JSON.stringify({ email });
+            const res = await axios.post('/api/auth/forgotpassword', body, config);
+            setMessage(res.data.msg); // Display success message from backend
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Something went wrong. Please try again.');
+        }
+    };
+
+    return (
+        <Container className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh' }}>
+            <Card style={{ width: '28rem' }}>
+                <Card.Body>
+                    <h1 className="text-center mb-4">Forgot Password</h1>
+                    <p className="lead text-center">Enter your email address to receive a password reset link.</p>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={onSubmit}>
+                        <Form.Group className="mb-3" controlId="formBasicEmail">
+                            <Form.Label>Email address</Form.Label>
+                            <Form.Control
+                                type="email"
+                                placeholder="Enter email"
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                required
+                            />
+                        </Form.Group>
+                        <Button variant="primary" type="submit" className="w-100">
+                            Send Reset Link
+                        </Button>
+                    </Form>
+                    <p className="mt-3 text-center">
+                        Remember your password? <a href="/login">Sign In</a>
+                    </p>
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default ForgotPassword;
+            |--IncomeManager.jsx
+            // frontend/src/components/IncomeManager.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Container, Card, Button, Form, Alert, Row, Col, ListGroup } from 'react-bootstrap';
+import { FaEdit, FaTrashAlt, FaPlusCircle } from 'react-icons/fa'; // Ensure react-icons is installed
+
+const IncomeManager = () => {
+    const [incomeEntries, setIncomeEntries] = useState([]);
+    const [formData, setFormData] = useState({
+        description: '',
+        amount: '',
+        date: '',
+        category: '',
+        notes: ''
+    });
+    const [editMode, setEditMode] = useState(false);
+    const [currentIncomeId, setCurrentIncomeId] = useState(null);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const { description, amount, date, category, notes } = formData;
+
+    useEffect(() => {
+        fetchIncome();
+    }, []);
+
+    const fetchIncome = async () => {
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token }
+            };
+            const res = await axios.get('/api/income', config);
+            setIncomeEntries(res.data);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch income entries.');
+            console.error(err);
+        }
+    };
+
+    const onChange = e => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+    const onSubmit = async e => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+
+            if (editMode) {
+                await axios.put(`/api/income/${currentIncomeId}`, formData, config);
+                setMessage('Income entry updated successfully!');
+            } else {
+                await axios.post('/api/income', formData, config);
+                setMessage('Income entry created successfully!');
+            }
+            resetForm();
+            fetchIncome(); // Refresh the list
+        } catch (err) {
+            setError(err.response?.data?.msg || err.response?.data?.errors?.[0]?.msg || 'Error saving income entry.');
+            console.error(err);
+        }
+    };
+
+    const onEdit = (incomeEntry) => {
+        setFormData({
+            description: incomeEntry.description,
+            amount: incomeEntry.amount,
+            date: incomeEntry.date.split('T')[0], // Format date for input
+            category: incomeEntry.category,
+            notes: incomeEntry.notes
+        });
+        setEditMode(true);
+        setCurrentIncomeId(incomeEntry._id);
+        setMessage('');
+        setError('');
+    };
+
+    const onDelete = async (id) => {
+        if (window.confirm('Are you sure you want to delete this income entry?')) {
+            setError('');
+            setMessage('');
+            try {
+                const token = localStorage.getItem('token');
+                const config = {
+                    headers: { 'x-auth-token': token }
+                };
+                await axios.delete(`/api/income/${id}`, config);
+                setMessage('Income entry deleted successfully!');
+                fetchIncome();
+            } catch (err) {
+                setError(err.response?.data?.msg || 'Failed to delete income entry.');
+                console.error(err);
+            }
+        }
+    };
+
+    const resetForm = () => {
+        setFormData({
+            description: '',
+            amount: '',
+            date: '',
+            category: '',
+            notes: ''
+        });
+        setEditMode(false);
+        setCurrentIncomeId(null);
+    };
+
+    return (
+        <Container className="mt-5">
+            <Card className="mb-4">
+                <Card.Body>
+                    <h2 className="text-center mb-4">{editMode ? 'Edit Income Entry' : 'Add New Income Entry'}</h2>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={onSubmit}>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="incomeDescription">
+                                    <Form.Label>Description</Form.Label>
+                                    <Form.Control
+                                        type="text"
+                                        placeholder="e.g., Monthly Salary, Freelance Payment"
+                                        name="description"
+                                        value={description}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="incomeAmount">
+                                    <Form.Label>Amount ($)</Form.Label>
+                                    <Form.Control
+                                        type="number"
+                                        step="0.01"
+                                        placeholder="0.00"
+                                        name="amount"
+                                        value={amount}
+                                        onChange={onChange}
+                                        min="0.01"
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="incomeDate">
+                                    <Form.Label>Date Received</Form.Label>
+                                    <Form.Control
+                                        type="date"
+                                        name="date"
+                                        value={date}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3" controlId="incomeCategory">
+                                    <Form.Label>Category</Form.Label>
+                                    <Form.Control
+                                        type="text"
+                                        placeholder="e.g., Salary, Investments, Gift"
+                                        name="category"
+                                        value={category}
+                                        onChange={onChange}
+                                        required
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+                        <Form.Group className="mb-3" controlId="incomeNotes">
+                            <Form.Label>Notes (Optional)</Form.Label>
+                            <Form.Control
+                                as="textarea"
+                                rows={3}
+                                placeholder="Any additional details"
+                                name="notes"
+                                value={notes}
+                                onChange={onChange}
+                            />
+                        </Form.Group>
+
+                        <div className="d-grid gap-2">
+                            <Button variant="success" type="submit">
+                                {editMode ? 'Update Income' : 'Add Income'}
+                            </Button>
+                            {editMode && (
+                                <Button variant="secondary" onClick={resetForm}>
+                                    Cancel Edit
+                                </Button>
+                            )}
+                        </div>
+                    </Form>
+                </Card.Body>
+            </Card>
+
+            <h2 className="mt-5 mb-4 text-center">My Income</h2>
+            {incomeEntries.length === 0 ? (
+                <Alert variant="info" className="text-center">No income recorded. Start by adding one!</Alert>
+            ) : (
+                <ListGroup className="mb-4">
+                    {incomeEntries.map(incomeEntry => (
+                        <ListGroup.Item key={incomeEntry._id} className="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h5>{incomeEntry.description} <span className="badge bg-secondary">{incomeEntry.category}</span></h5>
+                                <p className="mb-1 text-muted">
+                                    {new Date(incomeEntry.date).toLocaleDateString()}
+                                    {incomeEntry.notes && ` | Notes: ${incomeEntry.notes}`}
+                                </p>
+                            </div>
+                            <div className="text-end">
+                                <h4 className="text-success mb-1">+${incomeEntry.amount.toFixed(2)}</h4>
+                                <div>
+                                    <Button variant="info" size="sm" className="me-2" onClick={() => onEdit(incomeEntry)}>
+                                        <FaEdit />
+                                    </Button>
+                                    <Button variant="danger" size="sm" onClick={() => onDelete(incomeEntry._id)}>
+                                        <FaTrashAlt />
+                                    </Button>
+                                </div>
+                            </div>
+                        </ListGroup.Item>
+                    ))}
+                </ListGroup>
+            )}
+        </Container>
+    );
+};
+
+export default IncomeManager;
+            |--Layout.jsx
+            // frontend/src/components/Layout.jsx
+import React from 'react';
+import { Outlet, Link, useNavigate } from 'react-router-dom';
+import { Container, Button, Navbar, Nav } from 'react-bootstrap';
+import { jwtDecode } from 'jwt-decode';
+
+const Layout = () => {
+    const navigate = useNavigate();
+    const token = localStorage.getItem('token');
+    let userRole = '';
+
+    if (token) {
+        try {
+            const decodedToken = jwtDecode(token);
+            if (decodedToken.user && decodedToken.user.role) {
+                userRole = decodedToken.user.role;
+            }
+        } catch (error) {
+            console.error("Error decoding token in Layout:", error);
+            localStorage.removeItem('token');
+            navigate('/login');
+        }
+    }
+
+    const handleLogout = () => {
+        localStorage.removeItem('token');
+        navigate('/login');
+    };
+
+    return (
+        <>
+            <Navbar bg="dark" variant="dark" expand="lg">
+                <Container>
+                    <Navbar.Brand as={Link} to="/dashboard">Finance App</Navbar.Brand>
+                    <Navbar.Toggle aria-controls="basic-navbar-nav" />
+                    <Navbar.Collapse id="basic-navbar-nav">
+                        <Nav className="me-auto">
+                            <Nav.Link as={Link} to="/dashboard">Overview</Nav.Link>
+                            <Nav.Link as={Link} to="/budgets">Budgets</Nav.Link>
+                            <Nav.Link as={Link} to="/expenses">Expenses</Nav.Link> 
+                            <Nav.Link as={Link} to="/income">Income</Nav.Link>
+                            <Nav.Link as={Link} to="/reports">Reports</Nav.Link>
+                            <Nav.Link as={Link} to="/dreports">C Reports</Nav.Link>
+                            <Nav.Link as={Link} to="/settings/profile">Settings</Nav.Link>
+                            {(userRole === 'admin') && (
+                                <Nav.Link as={Link} to="/admin-dashboard">Admin</Nav.Link>
+                            )}
+                            {(userRole === 'accountant' || userRole === 'manager' || userRole === 'admin') && (
+                                <Nav.Link as={Link} to="/accounting-dashboard">Accounting</Nav.Link>
+                            )}
+                        </Nav>
+                        <Nav>
+                            <Button variant="outline-light" onClick={handleLogout}>Logout</Button>
+                        </Nav>
+                    </Navbar.Collapse>
+                </Container>
+            </Navbar>
+
+            <Outlet />
+        </>
+    );
+};
+
+export default Layout;
+            |--Login.jsx
+            // frontend/src/components/Login.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { useNavigate, Link } from 'react-router-dom';
+import { Form, Button, Container, Card, Alert } from 'react-bootstrap'; // Import Alert
+
+const Login = () => {
+    const [formData, setFormData] = useState({
+        email: '',
+        password: '',
+        twoFactorCode: '' // New state for 2FA code
+    });
+
+    const { email, password, twoFactorCode } = formData;
+    const [twoFactorRequired, setTwoFactorRequired] = useState(false); // State to control 2FA input visibility
+    const [error, setError] = useState(''); // State for displaying errors
+
+    const navigate = useNavigate();
+
+    const onChange = e =>
+        setFormData({ ...formData, [e.target.name]: e.target.value });
+
+    const onSubmit = async e => {
+        e.preventDefault();
+        setError(''); // Clear previous errors
+
+        try {
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            };
+            const body = JSON.stringify({ email, password, twoFactorCode });
+            const res = await axios.post('/api/auth/login', body, config);
+            console.log(res.data);
+
+            if (res.data.twoFactorRequired) {
+                setTwoFactorRequired(true); // Backend needs 2FA, show input
+                setMessage(res.data.msg); // Display message from backend
+                return; // Stop here, wait for 2FA code
+            }
+
+            localStorage.setItem('token', res.data.token);
+            navigate('/dashboard');
+        } catch (err) {
+            console.error(err.response?.data?.errors || err.response?.data?.msg || err.message);
+            setError(err.response?.data?.msg || 'Login failed');
+            // If the error indicates 2FA is required, but it wasn't caught above
+            if (err.response?.data?.twoFactorRequired) {
+                setTwoFactorRequired(true);
+            }
+        }
+    };
+
+    return (
+        <Container className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh' }}>
+            <Card style={{ width: '28rem' }}>
+                <Card.Body>
+                    <h1 className="text-center mb-4">Sign In</h1>
+                    <p className="lead text-center"><i className="fas fa-user"></i> Sign Into Your Account</p>
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={e => onSubmit(e)}>
+                        <Form.Group className="mb-3" controlId="formBasicEmail">
+                            <Form.Label>Email address</Form.Label>
+                            <Form.Control
+                                type="email"
+                                placeholder="Enter email"
+                                name="email"
+                                value={email}
+                                onChange={e => onChange(e)}
+                                required
+                            />
+                        </Form.Group>
+
+                        <Form.Group className="mb-3" controlId="formBasicPassword">
+                            <Form.Label>Password</Form.Label>
+                            <Form.Control
+                                type="password"
+                                placeholder="Password"
+                                name="password"
+                                value={password}
+                                onChange={e => onChange(e)}
+                                minLength="6"
+                                required
+                            />
+                        </Form.Group>
+
+                        {twoFactorRequired && (
+                            <Form.Group className="mb-3" controlId="formTwoFactorCode">
+                                <Form.Label>Two-Factor Code</Form.Label>
+                                <Form.Control
+                                    type="text"
+                                    placeholder="Enter 2FA code"
+                                    name="twoFactorCode"
+                                    value={twoFactorCode}
+                                    onChange={e => onChange(e)}
+                                    required
+                                />
+                                <Form.Text className="text-muted">
+                                    Open your authenticator app (e.g., Google Authenticator) to get the code.
+                                </Form.Text>
+                            </Form.Group>
+                        )}
+
+                        <div className="d-flex justify-content-end mb-3">
+                            <Link to="/forgot-password">Forgot Password?</Link>
+                        </div>
+
+                        <Button variant="primary" type="submit" className="w-100">
+                            Login
+                        </Button>
+                    </Form>
+                    <p className="mt-3 text-center">
+                        Don't have an account? <Link to="/register">Sign Up</Link>
+                    </p>
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default Login;
+            |--PrivateRoute.jsx
+            // frontend/src/components/PrivateRoute.jsx
+import React from 'react';
+import { Navigate, Outlet } from 'react-router-dom';
+import { jwtDecode } from 'jwt-decode'; // For decoding JWT on the client side
+
+const PrivateRoute = ({ allowedRoles }) => {
+    const token = localStorage.getItem('token');
+    let isAuthenticated = false;
+    let userRole = null;
+
+    if (token) {
+        try {
+            const decodedToken = jwtDecode(token);
+            // Check if token is expired
+            if (decodedToken.exp * 1000 > Date.now()) { // exp is in seconds, Date.now() is in milliseconds
+                isAuthenticated = true;
+                userRole = decodedToken.user.role;
+            } else {
+                localStorage.removeItem('token'); // Token expired, remove it
+            }
+        } catch (error) {
+            console.error("Invalid token:", error);
+            localStorage.removeItem('token'); // Invalid token, remove it
+        }
+    }
+
+    if (!isAuthenticated) {
+        return <Navigate to="/login" replace />; // Redirect to login if not authenticated
+    }
+
+    // If allowedRoles are specified, check if user has one of them
+    if (allowedRoles && allowedRoles.length > 0 && !allowedRoles.includes(userRole)) {
+        // You can redirect to an unauthorized page or dashboard, or show an error
+        return <Navigate to="/dashboard" replace />; // Redirect to dashboard if not authorized
+    }
+
+    return <Outlet />; // Render child routes if authenticated and authorized
+};
+
+export default PrivateRoute;
+            |--ProfileSettings.jsx
+            // frontend/src/components/ProfileSettings.jsx
+import React from 'react';
+import { Container, Card } from 'react-bootstrap';
+import TwoFactorAuthSetup from './TwoFactorAuthSetup.jsx'; // Import the 2FA component
+
+const ProfileSettings = () => {
+    return (
+        <Container className="mt-5">
+            <h1 className="text-center mb-4">Profile Settings</h1>
+            <Card className="mb-4">
+                <Card.Body>
+                    <h2 className="card-title">General Information</h2>
+                    <p>Here you can update your personal details (future feature).</p>
+                    {/* Add form for general profile updates here */}
+                </Card.Body>
+            </Card>
+
+            <TwoFactorAuthSetup /> {/* Embed the 2FA setup component */}
+
+            <Card className="mt-4">
+                <Card.Body>
+                    <h2 className="card-title">Preferences</h2>
+                    <p>Manage your application preferences (future feature).</p>
+                    {/* Add preferences settings here */}
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default ProfileSettings;
+            |--Register.jsx
+            // frontend/src/components/Register.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { useNavigate, Link } from 'react-router-dom';
+import { Form, Button, Container, Card } from 'react-bootstrap'; // Import React-Bootstrap components
+
+const Register = () => {
+    const [formData, setFormData] = useState({
+        email: '',
+        password: '',
+        password2: ''
+    });
+
+    const { email, password, password2 } = formData;
+
+    const navigate = useNavigate();
+
+    const onChange = e =>
+        setFormData({ ...formData, [e.target.name]: e.target.value });
+
+    const onSubmit = async e => {
+        e.preventDefault();
+        if (password !== password2) {
+            console.error('Passwords do not match');
+            alert('Passwords do not match'); // Simple alert for now
+            return;
+        } else {
+            try {
+                const config = {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                };
+                const body = JSON.stringify({ email, password });
+                const res = await axios.post('/api/auth/register', body, config);
+                console.log(res.data);
+                localStorage.setItem('token', res.data.token);
+                navigate('/dashboard');
+            } catch (err) {
+                console.error(err.response?.data?.errors || err.response?.data?.msg || err.message);
+                alert(err.response?.data?.msg || 'Registration failed'); // Display error to user
+            }
+        }
+    };
+
+    return (
+        <Container className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh' }}>
+            <Card style={{ width: '28rem' }}>
+                <Card.Body>
+                    <h1 className="text-center mb-4">Sign Up</h1>
+                    <p className="lead text-center"><i className="fas fa-user"></i> Create Your Account</p>
+                    <Form onSubmit={e => onSubmit(e)}>
+                        <Form.Group className="mb-3" controlId="formBasicEmail">
+                            <Form.Label>Email address</Form.Label>
+                            <Form.Control
+                                type="email"
+                                placeholder="Enter email"
+                                name="email"
+                                value={email}
+                                onChange={e => onChange(e)}
+                                required
+                            />
+                        </Form.Group>
+
+                        <Form.Group className="mb-3" controlId="formBasicPassword">
+                            <Form.Label>Password</Form.Label>
+                            <Form.Control
+                                type="password"
+                                placeholder="Password"
+                                name="password"
+                                value={password}
+                                onChange={e => onChange(e)}
+                                minLength="6"
+                                required
+                            />
+                        </Form.Group>
+
+                        <Form.Group className="mb-3" controlId="formBasicPassword2">
+                            <Form.Label>Confirm Password</Form.Label>
+                            <Form.Control
+                                type="password"
+                                placeholder="Confirm Password"
+                                name="password2"
+                                value={password2}
+                                onChange={e => onChange(e)}
+                                minLength="6"
+                                required
+                            />
+                        </Form.Group>
+
+                        <Button variant="primary" type="submit" className="w-100">
+                            Register
+                        </Button>
+                    </Form>
+                    <p className="mt-3 text-center">
+                        Already have an account? <Link to="/login">Sign In</Link>
+                    </p>
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default Register;
+            |--ReportGenerator.jsx
+            // frontend/src/components/ReportGenerator.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Container, Card, Form, Button, Alert, Row, Col, Spinner, ListGroup } from 'react-bootstrap';
+import { Bar, Pie, Line } from 'react-chartjs-2';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, ArcElement, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+
+// Register Chart.js components
+ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, PointElement, LineElement, Title, Tooltip, Legend);
+
+
+const ReportGenerator = () => {
+    const [reportType, setReportType] = useState('expenses-by-category');
+    const [period, setPeriod] = useState('monthly');
+    const [year, setYear] = useState(new Date().getFullYear());
+    const [month, setMonth] = useState(new Date().getMonth()); // 0-indexed for JS Date
+    const [reportData, setReportData] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    const currentYear = new Date().getFullYear();
+    const years = Array.from({ length: 5 }, (_, i) => currentYear - i); // Last 5 years
+    const months = [
+        { value: 0, name: 'January' }, { value: 1, name: 'February' }, { value: 2, name: 'March' },
+        { value: 3, name: 'April' }, { value: 4, name: 'May' }, { value: 5, name: 'June' },
+        { value: 6, name: 'July' }, { value: 7, name: 'August' }, { value: 8, name: 'September' },
+        { value: 9, name: 'October' }, { value: 10, name: 'November' }, { value: 11, name: 'December' }
+    ];
+
+    useEffect(() => {
+        // Fetch report on initial load or when filters change
+        fetchReportData();
+    }, [reportType, period, year, month]); // Dependency array ensures refetch on filter change
+
+    const fetchReportData = async () => {
+        setLoading(true);
+        setError('');
+        setReportData(null); // Clear previous data
+
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token }
+            };
+
+            let url = `/api/dashboard/reports/${reportType}`;
+            const params = new URLSearchParams();
+            params.append('period', period);
+            params.append('year', year);
+            if (period === 'monthly' || period === 'quarterly') { // Month relevant for monthly/quarterly
+                 params.append('month', month);
+            }
+
+            url += `?${params.toString()}`;
+
+            const res = await axios.get(url, config);
+            setReportData(res.data);
+            setLoading(false);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch report data.');
+            setLoading(false);
+            console.error(err);
+        }
+    };
+
+    // Chart Data and Options based on reportType
+    const getChartData = () => {
+        if (!reportData) return {};
+
+        switch (reportType) {
+            case 'expenses-by-category':
+            case 'income-by-category':
+                const labels = reportData[`${reportType.split('-')[0]}ByCategory`].map(item => item._id);
+                const data = reportData[`${reportType.split('-')[0]}ByCategory`].map(item => item.totalAmount);
+                const backgroundColor = data.map(() => `rgba(${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, 0.6)`);
+                const borderColor = backgroundColor.map(color => color.replace('0.6', '1'));
+
+                return {
+                    labels: labels,
+                    datasets: [{
+                        label: `Total Amount (${reportType === 'expenses-by-category' ? 'Expenses' : 'Income'})`,
+                        data: data,
+                        backgroundColor: backgroundColor,
+                        borderColor: borderColor,
+                        borderWidth: 1,
+                    }]
+                };
+            case 'transaction-trends':
+                const trendLabels = reportData.trends.map(item => item._id);
+                const trendData = reportData.trends.map(item => item.totalAmount);
+                const trendColor = reportData.type === 'expense' ? 'rgba(255, 99, 132, 0.8)' : 'rgba(75, 192, 192, 0.8)';
+                const trendBorderColor = reportData.type === 'expense' ? 'rgba(255, 99, 132, 1)' : 'rgba(75, 192, 192, 1)';
+
+                return {
+                    labels: trendLabels,
+                    datasets: [{
+                        label: `${reportData.type.charAt(0).toUpperCase() + reportData.type.slice(1)} Trend`,
+                        data: trendData,
+                        fill: false,
+                        borderColor: trendBorderColor,
+                        backgroundColor: trendColor,
+                        tension: 0.1
+                    }]
+                };
+            default:
+                return {};
+        }
+    };
+
+    const getChartOptions = (chartTitle) => {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: chartTitle,
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            let label = context.dataset.label || '';
+                            if (label) {
+                                label += ': ';
+                            }
+                            if (context.parsed.y !== null) {
+                                label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y);
+                            }
+                            return label;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) {
+                            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
+                        }
+                    }
+                }
+            }
+        };
+    };
+
+    const handleExportCSV = () => {
+        if (!reportData) {
+            setError("No data to export.");
+            return;
+        }
+
+        let csvContent = "";
+        let filename = `${reportType}-report.csv`;
+
+        if (reportType === 'expenses-by-category' && reportData.expensesByCategory) {
+            csvContent += "Category,Total Amount,Count\n";
+            reportData.expensesByCategory.forEach(item => {
+                csvContent += `${item._id},${item.totalAmount.toFixed(2)},${item.count}\n`;
+            });
+        } else if (reportType === 'income-by-category' && reportData.incomeByCategory) {
+            csvContent += "Category,Total Amount,Count\n";
+            reportData.incomeByCategory.forEach(item => {
+                csvContent += `${item._id},${item.totalAmount.toFixed(2)},${item.count}\n`;
+            });
+        } else if (reportType === 'transaction-trends' && reportData.trends) {
+            csvContent += "Period,Total Amount\n";
+            reportData.trends.forEach(item => {
+                csvContent += `${item._id},${item.totalAmount.toFixed(2)}\n`;
+            });
+            filename = `${reportData.type}-trends-${reportData.period}-report.csv`;
+        } else {
+            setError("Unsupported report type for CSV export or no data.");
+            return;
+        }
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        if (link.download !== undefined) { // feature detection
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", filename);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+        setMessage("Report exported to CSV!");
+    };
+
+
+    return (
+        <Container className="mt-5">
+            <Card className="mb-4">
+                <Card.Body>
+                    <h2 className="text-center mb-4">Financial Reports & Analytics</h2>
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    {message && <Alert variant="success">{message}</Alert>}
+
+                    <Form>
+                        <Row className="mb-3 align-items-end">
+                            <Col md={4}>
+                                <Form.Group controlId="reportType">
+                                    <Form.Label>Select Report</Form.Label>
+                                    <Form.Select value={reportType} onChange={e => setReportType(e.target.value)}>
+                                        <option value="expenses-by-category">Expenses by Category</option>
+                                        <option value="income-by-category">Income by Category</option>
+                                        <option value="transaction-trends">Transaction Trends</option>
+                                        {/* Future: <option value="balance-sheet">Balance Sheet</option> */}
+                                    </Form.Select>
+                                </Form.Group>
+                            </Col>
+                            <Col md={3}>
+                                <Form.Group controlId="period">
+                                    <Form.Label>Period</Form.Label>
+                                    <Form.Select value={period} onChange={e => setPeriod(e.target.value)}>
+                                        <option value="monthly">Monthly</option>
+                                        <option value="quarterly">Quarterly</option>
+                                        <option value="annually">Annually</option>
+                                    </Form.Select>
+                                </Form.Group>
+                            </Col>
+                            <Col md={2}>
+                                <Form.Group controlId="year">
+                                    <Form.Label>Year</Form.Label>
+                                    <Form.Select value={year} onChange={e => setYear(e.target.value)}>
+                                        {years.map(y => <option key={y} value={y}>{y}</option>)}
+                                    </Form.Select>
+                                </Form.Group>
+                            </Col>
+                            {(period === 'monthly' || period === 'quarterly') && (
+                                <Col md={3}>
+                                    <Form.Group controlId="month">
+                                        <Form.Label>Month (for Monthly/Quarterly)</Form.Label>
+                                        <Form.Select value={month} onChange={e => setMonth(e.target.value)}>
+                                            {months.map(m => (
+                                                <option key={m.value} value={m.value}>{m.name}</option>
+                                            ))}
+                                        </Form.Select>
+                                    </Form.Group>
+                                </Col>
+                            )}
+                             {/* For transaction-trends, add type filter */}
+                             {reportType === 'transaction-trends' && (
+                                <Col md={3}>
+                                    <Form.Group controlId="trendType">
+                                        <Form.Label>Transaction Type</Form.Label>
+                                        <Form.Select
+                                            value={reportData?.type || ''} // Use data from actual report if available
+                                            onChange={e => {
+                                                setReportData(prev => ({ ...prev, type: e.target.value })); // Update data.type
+                                                // Trigger refetch with new type
+                                                fetchReportData();
+                                            }}
+                                        >
+                                            <option value="">Select Type</option>
+                                            <option value="expense">Expense</option>
+                                            <option value="income">Income</option>
+                                        </Form.Select>
+                                    </Form.Group>
+                                </Col>
+                            )}
+                        </Row>
+                        {/* <Button variant="primary" onClick={fetchReportData} className="mt-3">
+                            Generate Report
+                        </Button> */}
+                    </Form>
+                </Card.Body>
+            </Card>
+
+            {loading && (
+                <div className="text-center mt-5">
+                    <Spinner animation="border" role="status">
+                        <span className="visually-hidden">Loading report...</span>
+                    </Spinner>
+                    <p className="mt-3">Generating your report...</p>
+                </div>
+            )}
+
+            {!loading && reportData && (
+                <Card className="mt-4">
+                    <Card.Body>
+                        <h3 className="mb-4 text-center">Report Results</h3>
+                        {reportData.startDate && reportData.endDate && (
+                            <p className="text-center text-muted">
+                                Data from: {new Date(reportData.startDate).toLocaleDateString()} to {new Date(reportData.endDate).toLocaleDateString()}
+                            </p>
+                        )}
+                        <hr />
+
+                        {/* Render Charts */}
+                        {reportType === 'expenses-by-category' && reportData.expensesByCategory && reportData.expensesByCategory.length > 0 && (
+                            <>
+                                <h4 className="mt-4">Expenses by Category Chart</h4>
+                                <div style={{ height: '400px' }}> {/* Fixed height for chart */}
+                                    <Pie data={getChartData()} options={getChartOptions('Expenses by Category')} />
+                                </div>
+                                <h5 className="mt-4">Detailed Breakdown:</h5>
+                                <ListGroup>
+                                    {reportData.expensesByCategory.map((item, index) => (
+                                        <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
+                                            {item._id}:
+                                            <span className="badge bg-danger">${item.totalAmount.toFixed(2)} ({item.count} items)</span>
+                                        </ListGroup.Item>
+                                    ))}
+                                </ListGroup>
+                            </>
+                        )}
+
+                        {reportType === 'income-by-category' && reportData.incomeByCategory && reportData.incomeByCategory.length > 0 && (
+                            <>
+                                <h4 className="mt-4">Income by Category Chart</h4>
+                                <div style={{ height: '400px' }}>
+                                    <Pie data={getChartData()} options={getChartOptions('Income by Category')} />
+                                </div>
+                                <h5 className="mt-4">Detailed Breakdown:</h5>
+                                <ListGroup>
+                                    {reportData.incomeByCategory.map((item, index) => (
+                                        <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
+                                            {item._id}:
+                                            <span className="badge bg-success">${item.totalAmount.toFixed(2)} ({item.count} items)</span>
+                                        </ListGroup.Item>
+                                    ))}
+                                </ListGroup>
+                            </>
+                        )}
+
+                        {reportType === 'transaction-trends' && reportData.trends && reportData.trends.length > 0 && (
+                            <>
+                                <h4 className="mt-4">{reportData.type.charAt(0).toUpperCase() + reportData.type.slice(1)} Trends Over Time</h4>
+                                <div style={{ height: '400px' }}>
+                                    <Line data={getChartData()} options={getChartOptions(`${reportData.type.charAt(0).toUpperCase() + reportData.type.slice(1)} Trends`)} />
+                                </div>
+                                <h5 className="mt-4">Detailed Trends:</h5>
+                                <ListGroup>
+                                    {reportData.trends.map((item, index) => (
+                                        <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
+                                            {item._id}:
+                                            <span className={`badge ${reportData.type === 'income' ? 'bg-success' : 'bg-danger'}`}>
+                                                ${item.totalAmount.toFixed(2)}
+                                            </span>
+                                        </ListGroup.Item>
+                                    ))}
+                                </ListGroup>
+                            </>
+                        )}
+
+                        {/* No data message */}
+                        {((reportType === 'expenses-by-category' && (!reportData.expensesByCategory || reportData.expensesByCategory.length === 0)) ||
+                        (reportType === 'income-by-category' && (!reportData.incomeByCategory || reportData.incomeByCategory.length === 0)) ||
+                        (reportType === 'transaction-trends' && (!reportData.trends || reportData.trends.length === 0))) && (
+                            <Alert variant="info" className="text-center mt-4">
+                                No data found for the selected criteria. Try adjusting the filters or adding more transactions.
+                            </Alert>
+                        )}
+
+                        {/* Export Button */}
+                        <div className="d-grid gap-2 mt-4">
+                            <Button variant="outline-dark" onClick={handleExportCSV}>
+                                Export to CSV
+                            </Button>
+                        </div>
+                    </Card.Body>
+                </Card>
+            )}
+        </Container>
+    );
+};
+
+export default ReportGenerator;
+            |--ReportsPage.jsx
+            // frontend/src/components/ReportsPage.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { Container, Card, Button, Form, Alert, Row, Col, ListGroup, Tab, Tabs, Spinner } from 'react-bootstrap';
+
+const ReportsPage = () => {
+    const [startDate, setStartDate] = useState('');
+    const [endDate, setEndDate] = useState('');
+    const [spendingReport, setSpendingReport] = useState(null);
+    const [incomeReport, setIncomeReport] = useState(null);
+    const [netIncomeReport, setNetIncomeReport] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [activeTab, setActiveTab] = useState('spending'); // Default active tab
+
+    const fetchReport = async (reportType) => {
+        setLoading(true);
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: { 'x-auth-token': token },
+                params: { startDate, endDate } // Pass dates as query parameters
+            };
+            const res = await axios.get(`/api/reports/${reportType}`, config);
+            switch (reportType) {
+                case 'spending-by-category':
+                    setSpendingReport(res.data);
+                    break;
+                case 'income-by-category':
+                    setIncomeReport(res.data);
+                    break;
+                case 'net-income':
+                    setNetIncomeReport(res.data);
+                    break;
+                default:
+                    break;
+            }
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to fetch report.');
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleGenerateReports = () => {
+        if (!startDate || !endDate) {
+            setError('Please select both start and end dates.');
+            return;
+        }
+        if (new Date(startDate) > new Date(endDate)) {
+            setError('Start date cannot be after end date.');
+            return;
+        }
+        setError(''); // Clear previous errors
+        fetchReport('spending-by-category');
+        fetchReport('income-by-category');
+        fetchReport('net-income');
+    };
+
+    const renderSpendingReport = () => {
+        if (!spendingReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view spending by category.</Alert>;
+        if (spendingReport.length === 0) return <Alert variant="warning" className="mt-3 text-center">No expenses found for the selected period.</Alert>;
+
+        const totalSpent = spendingReport.reduce((acc, item) => acc + item.totalSpent, 0);
+
+        return (
+            <div className="mt-3">
+                <h5 className="mb-3 text-center">Total Spent: ${totalSpent.toFixed(2)}</h5>
+                <ListGroup>
+                    {spendingReport.map(item => (
+                        <ListGroup.Item key={item._id} className="d-flex justify-content-between align-items-center">
+                            {item._id}
+                            <span className="badge bg-danger">${item.totalSpent.toFixed(2)}</span>
+                        </ListGroup.Item>
+                    ))}
+                </ListGroup>
+            </div>
+        );
+    };
+
+    const renderIncomeReport = () => {
+        if (!incomeReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view income by category.</Alert>;
+        if (incomeReport.length === 0) return <Alert variant="warning" className="mt-3 text-center">No income found for the selected period.</Alert>;
+
+        const totalReceived = incomeReport.reduce((acc, item) => acc + item.totalReceived, 0);
+
+        return (
+            <div className="mt-3">
+                <h5 className="mb-3 text-center">Total Received: ${totalReceived.toFixed(2)}</h5>
+                <ListGroup>
+                    {incomeReport.map(item => (
+                        <ListGroup.Item key={item._id} className="d-flex justify-content-between align-items-center">
+                            {item._id}
+                            <span className="badge bg-success">${item.totalReceived.toFixed(2)}</span>
+                        </ListGroup.Item>
+                    ))}
+                </ListGroup>
+            </div>
+        );
+    };
+
+    const renderNetIncomeReport = () => {
+        if (!netIncomeReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view net income.</Alert>;
+
+        const { totalIncome: netTotalIncome, totalExpenses: netTotalExpenses, netIncome: calculatedNetIncome } = netIncomeReport;
+
+        return (
+            <div className="mt-3 text-center">
+                <p><strong>Total Income:</strong> <span className="text-success">${netTotalIncome.toFixed(2)}</span></p>
+                <p><strong>Total Expenses:</strong> <span className="text-danger">${netTotalExpenses.toFixed(2)}</span></p>
+                <Alert variant={calculatedNetIncome >= 0 ? 'success' : 'danger'} className="mt-3">
+                    <h4>Net Income/Loss: ${calculatedNetIncome.toFixed(2)}</h4>
+                </Alert>
+            </div>
+        );
+    };
+
+    return (
+        <Container className="mt-5">
+            <h1 className="text-center mb-4">Financial Reports</h1>
+
+            <Card className="mb-4">
+                <Card.Body>
+                    <Card.Title className="mb-3">Select Report Period</Card.Title>
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Row className="align-items-end">
+                        <Col md={5}>
+                            <Form.Group controlId="startDate">
+                                <Form.Label>Start Date</Form.Label>
+                                <Form.Control
+                                    type="date"
+                                    value={startDate}
+                                    onChange={(e) => setStartDate(e.target.value)}
+                                />
+                            </Form.Group>
+                        </Col>
+                        <Col md={5}>
+                            <Form.Group controlId="endDate">
+                                <Form.Label>End Date</Form.Label>
+                                <Form.Control
+                                    type="date"
+                                    value={endDate}
+                                    onChange={(e) => setEndDate(e.target.value)}
+                                />
+                            </Form.Group>
+                        </Col>
+                        <Col md={2}>
+                            <Button
+                                variant="primary"
+                                onClick={handleGenerateReports}
+                                className="w-100"
+                                disabled={loading}
+                            >
+                                {loading ? <Spinner animation="border" size="sm" /> : 'Generate Reports'}
+                            </Button>
+                        </Col>
+                    </Row>
+                </Card.Body>
+            </Card>
+
+            <Card>
+                <Card.Body>
+                    <Tabs
+                        id="report-tabs"
+                        activeKey={activeTab}
+                        onSelect={(k) => setActiveTab(k)}
+                        className="mb-3"
+                        fill // Makes tabs take full width
+                    >
+                        <Tab eventKey="spending" title="Spending by Category">
+                            {renderSpendingReport()}
+                        </Tab>
+                        <Tab eventKey="income" title="Income by Category">
+                            {renderIncomeReport()}
+                        </Tab>
+                        <Tab eventKey="net-income" title="Net Income/Loss">
+                            {renderNetIncomeReport()}
+                        </Tab>
+                    </Tabs>
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default ReportsPage;
+            |--ResetPassword.jsx
+            // frontend/src/components/ResetPassword.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { useParams, useNavigate } from 'react-router-dom';
+import { Form, Button, Container, Card, Alert } from 'react-bootstrap';
+
+const ResetPassword = () => {
+    const [password, setPassword] = useState('');
+    const [password2, setPassword2] = useState('');
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const { resettoken } = useParams(); // Get the token from the URL
+    const navigate = useNavigate();
+
+    const onSubmit = async (e) => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+
+        if (password !== password2) {
+            setError('Passwords do not match');
+            return;
+        }
+
+        try {
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            };
+            const body = JSON.stringify({ password, password2 });
+            const res = await axios.put(`/api/auth/resetpassword/${resettoken}`, body, config);
+            setMessage(res.data.msg);
+            setTimeout(() => {
+                navigate('/login'); // Redirect to login after successful reset
+            }, 3000); // Redirect after 3 seconds
+        } catch (err) {
+            setError(err.response?.data?.msg || err.response?.data?.errors?.[0]?.msg || 'Failed to reset password. Invalid or expired token.');
+        }
+    };
+
+    return (
+        <Container className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh' }}>
+            <Card style={{ width: '28rem' }}>
+                <Card.Body>
+                    <h1 className="text-center mb-4">Reset Password</h1>
+                    <p className="lead text-center">Enter your new password.</p>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Form onSubmit={onSubmit}>
+                        <Form.Group className="mb-3" controlId="formNewPassword">
+                            <Form.Label>New Password</Form.Label>
+                            <Form.Control
+                                type="password"
+                                placeholder="Enter new password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                minLength="6"
+                                required
+                            />
+                        </Form.Group>
+                        <Form.Group className="mb-3" controlId="formConfirmNewPassword">
+                            <Form.Label>Confirm New Password</Form.Label>
+                            <Form.Control
+                                type="password"
+                                placeholder="Confirm new password"
+                                value={password2}
+                                onChange={(e) => setPassword2(e.target.value)}
+                                minLength="6"
+                                required
+                            />
+                        </Form.Group>
+                        <Button variant="primary" type="submit" className="w-100">
+                            Reset Password
+                        </Button>
+                    </Form>
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default ResetPassword;
+            |--TwoFactorAuthSetup.jsx
+            // frontend/src/components/TwoFactorAuthSetup.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Container, Card, Button, Form, Alert, Image } from 'react-bootstrap';
+
+const TwoFactorAuthSetup = () => {
+    const [qrCodeUrl, setQrCodeUrl] = useState('');
+    const [secretKey, setSecretKey] = useState('');
+    const [code, setCode] = useState('');
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+    const [is2faEnabled, setIs2faEnabled] = useState(false); // To check initial 2FA status
+
+    useEffect(() => {
+        const check2FAStatus = async () => {
+            const token = localStorage.getItem('token');
+            if (!token) {
+                // Not logged in, handle redirect or message
+                return;
+            }
+            try {
+                // Make a protected API call to get user info, which might include 2FA status
+                // For now, let's assume we can get it from decoding the current token's payload
+                // In a real app, you'd have a /api/users/me endpoint
+                const decodedToken = JSON.parse(atob(token.split('.')[1])); // Simple decode (no validation)
+                if (decodedToken.user && decodedToken.user.isTwoFactorEnabled !== undefined) {
+                    setIs2faEnabled(decodedToken.user.isTwoFactorEnabled);
+                } else {
+                    // Fallback: make an actual API call to get user status
+                    // This requires a new backend route, e.g., /api/auth/me
+                    // For now, we'll assume the initial login response gave us this
+                    // If your login response doesn't give isTwoFactorEnabled, you'd need an extra fetch here
+                }
+            } catch (err) {
+                console.error("Error decoding token or checking 2FA status:", err);
+                localStorage.removeItem('token'); // Invalid token
+            }
+        };
+        check2FAStatus();
+    }, []);
+
+    const generateSecret = async () => {
+        setMessage('');
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+            const res = await axios.post('/api/auth/2fa/generate-secret', {}, config);
+            setQrCodeUrl(res.data.qrCodeUrl);
+            setSecretKey(res.data.secret);
+            setMessage('Scan the QR code or enter the secret key into your authenticator app.');
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to generate 2FA secret.');
+            console.error(err);
+        }
+    };
+
+    const verifySetup = async (e) => {
+        e.preventDefault();
+        setMessage('');
+        setError('');
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+            const res = await axios.post('/api/auth/2fa/verify-setup', { token: code }, config);
+            setMessage(res.data.msg);
+            setIs2faEnabled(true);
+            setQrCodeUrl(''); // Clear QR code after successful setup
+            setSecretKey(''); // Clear secret key
+            setCode(''); // Clear code input
+            // Refresh token on client side if backend issues a new one, or re-login if needed
+            // For simplicity, we just update status here. In a real app, you might want to refresh the token.
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Invalid 2FA code. Please try again.');
+            console.error(err);
+        }
+    };
+
+    const disable2FA = async () => {
+        setMessage('');
+        setError('');
+        const confirmDisable = window.confirm("Are you sure you want to disable 2FA? You will need to re-enable it if you change your mind.");
+        if (!confirmDisable) return;
+
+        const passwordInput = prompt("Please enter your current password to confirm disabling 2FA:");
+        if (!passwordInput) {
+            setError("Password is required to disable 2FA.");
+            return;
+        }
+
+        try {
+            const token = localStorage.getItem('token');
+            const config = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                }
+            };
+            const res = await axios.post('/api/auth/2fa/disable', { password: passwordInput }, config);
+            setMessage(res.data.msg);
+            setIs2faEnabled(false);
+        } catch (err) {
+            setError(err.response?.data?.msg || 'Failed to disable 2FA.');
+            console.error(err);
+        }
+    };
+
+
+    return (
+        <Container className="mt-5">
+            <Card>
+                <Card.Body>
+                    <h2 className="text-center mb-4">Two-Factor Authentication (2FA)</h2>
+                    {message && <Alert variant="success">{message}</Alert>}
+                    {error && <Alert variant="danger">{error}</Alert>}
+
+                    {is2faEnabled ? (
+                        <div>
+                            <p className="lead text-center text-success">2FA is currently <strong className="text-decoration-underline">ENABLED</strong> for your account.</p>
+                            <Button variant="danger" onClick={disable2FA}>Disable 2FA</Button>
+                        </div>
+                    ) : (
+                        <div>
+                            <p className="lead text-center">Enhance your account security with 2FA.</p>
+                            {!qrCodeUrl && (
+                                <Button variant="primary" onClick={generateSecret}>Enable 2FA</Button>
+                            )}
+
+                            {qrCodeUrl && (
+                                <div className="mt-4 text-center">
+                                    <h5>Scan with your Authenticator App:</h5>
+                                    <Image src={qrCodeUrl} alt="2FA QR Code" fluid className="mb-3" style={{ maxWidth: '200px' }} />
+                                    <p>Or manually enter this key:</p>
+                                    <p className="fw-bold fs-5 text-break">{secretKey}</p>
+                                    <Form onSubmit={verifySetup} className="mt-3">
+                                        <Form.Group className="mb-3" controlId="form2FACode">
+                                            <Form.Label>Verify Code</Form.Label>
+                                            <Form.Control
+                                                type="text"
+                                                placeholder="Enter 6-digit code from app"
+                                                value={code}
+                                                onChange={(e) => setCode(e.target.value)}
+                                                maxLength="6"
+                                                required
+                                            />
+                                            <Form.Text className="text-muted">
+                                                Enter the 6-digit code displayed in your authenticator app to complete setup.
+                                            </Form.Text>
+                                        </Form.Group>
+                                        <Button variant="success" type="submit">Verify & Enable 2FA</Button>
+                                    </Form>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </Card.Body>
+            </Card>
+        </Container>
+    );
+};
+
+export default TwoFactorAuthSetup;
+        |--app.css
+        |--app.jsx
+        import React,{ useState } from 'react';
+import { BrowserRouter as Router,Route,Routes} from 'react-router-dom';
+import Register from './components/Register.jsx';
+import Login from './components/Login.jsx';
+import Dashboard from './components/Dashboard.jsx';
+import ForgotPassword from './components/ForgotPassword.jsx';
+import ResetPassword from './components/ResetPassword.jsx';
+import PrivateRoute from './components/PrivateRoute.jsx';
+import AdminDashboard from './components/AdminDashboard.jsx';
+import AccountantDashboard from './components/AccountantDashboard.jsx';
+import BudgetManager from './components/BudgetManager.jsx';
+import ExpenseManager from './components/ExpenseManager.jsx';
+import IncomeManager from './components/IncomeManager.jsx';
+import ReportsPage from './components/ReportsPage.jsx';
+import ReportGenerator from './components/ReportGenerator.jsx';
+
+import Layout from './components/Layout.jsx';
+import ProfileSettings from './components/ProfileSettings.jsx';
+
+import './App.css';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+function App (){
+  return (
+    <Router>
+      <div className="App">
+        <Routes>
+          <Route path="/register" element={<Register />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/forgotpassword" element={<ForgotPassword/>}/>
+          <Route path="/resetpassword/:resettoken" element={<ResetPassword/>} />
+          <Route element={<Layout/>}>
+          {/* Protected Routes */}
+          <Route element={<PrivateRoute />}>
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/budgets" element={<BudgetManager/>}/>
+            <Route path="/expenses" element={<ExpenseManager/>}/>
+            <Route path="/income" element={<IncomeManager/>}/>
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/reports" element={<ReportGenerator />} />
+            
+            <Route path="/settings/profile" element={<ProfileSettings/>}/> 
+            {/* More protected regular user routes here */}
+          </Route>
+
+          {/* Protected Admin Routes */}
+          <Route element={<PrivateRoute allowedRoles={['admin']} />}>
+            <Route path="/admin-dashboard" element={<AdminDashboard />} />
+            {/* More protected admin-only routes here */}
+          </Route>
+
+          {/* Protected Accountant/Manager Routes */}
+          <Route element={<PrivateRoute allowedRoles={['accountant', 'manager', 'admin']} />}>
+            <Route path="/accounting-dashboard" element={<AccountantDashboard />} />
+            {/* More protected accounting/manager routes here */}
+          </Route>
+        </Route>
+          <Route path="/" element={<Login />} /> {/* Default route */}
+        </Routes>
+      </div>
+    </Router>
+  );
+}
+
+export default App;
+
+        |--index.css
+        :root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  a:hover {
+    color: #747bff;
+  }
+  button {
+    background-color: #f9f9f9;
+  }
+}
+
+        |--main.jsx
+        import React,{ StrictMode } from 'react';
+import ReactDOM,{ createRoot } from 'react-dom/client';
+import './index.css'
+import App from './App.jsx'
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+
+    |--.gitignore
+    |--eslint.config.js
+    |--index.html
+    |--package.json
+    {
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "bootstrap": "^5.3.6",
+    "chart.js": "^4.4.9",
+    "react": "^19.1.0",
+    "react-bootstrap": "^2.10.10",
+    "react-chartjs-2": "^5.3.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "vite": "^6.3.5"
+  }
+}
+
+    |--readme.md
+    |vite.config.js
