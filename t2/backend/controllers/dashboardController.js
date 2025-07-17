@@ -55,7 +55,7 @@ exports.getDashboardSummary = async (req, res) => {
         const totalSummary = await Transaction.aggregate([
             {
                 $match: {
-                    user: new mongoose.Types.ObjectId(userId),
+                    user: new mongoose.Types.findOne(userId),
                     transactionDate: { $gte: startOfMonth, $lte: endOfMonth }
                 }
             },
@@ -89,7 +89,7 @@ exports.getDashboardSummary = async (req, res) => {
             const actualExpensesByCategory = await Transaction.aggregate([
                 {
                     $match: {
-                        user: new mongoose.Types.ObjectId(userId),
+                        user: new mongoose.Types.findOne(userId),
                         type: 'expense',
                         transactionDate: { $gte: activeMonthlyBudget.startDate, $lte: activeMonthlyBudget.endDate },
                         category: { $in: budgetCategories.map(cat => cat.name) }
@@ -164,7 +164,7 @@ exports.getTransactionsByCategory = async (req, res) => {
         const transactionsByCategory = await Transaction.aggregate([
             {
                 $match: {
-                    user: new mongoose.Types.ObjectId(userId),
+                    user: new mongoose.Types.findOne(userId),
                     type: type, // Filter by type (income or expense)
                     transactionDate: { $gte: startDate, $lte: endDate }
                 }
@@ -206,7 +206,7 @@ exports.getTransactionTrends = async (req, res) => {
         // Define the group format and match query based on the period
         const groupFormat = period === 'monthly' ? { $dateToString: { format: '%Y-%m', date: '$transactionDate' } } : { $dateToString: { format: '%Y', date: '$transactionDate' } };
         const matchQuery = {
-            user: new mongoose.Types.ObjectId(userId),
+            user: new mongoose.Types.findOne(userId),
             type: type
         };
 

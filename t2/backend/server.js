@@ -19,13 +19,13 @@ const app = express();
 connectDB();
 
 // Init Middleware
-app.use(express.json({ extended: false })); // Allows us to get data in req.body
+app.use(express.json({ extended: false })); 
 app.use(cors()); // Enable CORS
 
 // Define Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/budgets',budgetRoutes);
-app.use('/api/transaction',transactionRoutes);
+app.use('/api/transactions',transactionRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/userinfo', userInformationRoutes);

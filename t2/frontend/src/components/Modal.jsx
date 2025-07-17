@@ -59,7 +59,7 @@ const ProfileSettings = () => {
             const config = {
                 headers: { [AUTH_TOKEN_KEY]: token }
             };
-
+            
             // Construct the API path using the extracted ID
             const API_URL = `${API_BASE_PROFILE_PATH}/${id}`;
             const res = await axiosInstance.get(API_URL, config);

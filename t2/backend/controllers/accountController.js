@@ -1,11 +1,11 @@
 const Account = require('../models/Account');
-const errorHandler = require('../utils/errorHandler'); // Your error handler
+const errorHandler = require('../utils/errorHandler'); 
 
 // @route   POST /api/accounts
 // @desc    Create a new account
 // @access  Private
 exports.createAccount = async (req, res) => {
-    const { name, type, balance } = req.body;
+    const { name, type, currentBalance } = req.body;
     const userId = req.user.id;
 
     try {
@@ -13,7 +13,7 @@ exports.createAccount = async (req, res) => {
             user: userId,
             name,
             type,
-            balance,
+            currentBalance,
         });
 
         const account = await newAccount.save();
@@ -59,7 +59,7 @@ exports.getAccountById = async (req, res) => {
 // @desc    Update an account
 // @access  Private
 exports.updateAccount = async (req, res) => {
-    const { name, type, initialBalance,currentBalance,currency } = req.body;
+    const { name, type,currentBalance,currency } = req.body;
     const accountId = req.params.id;
     const userId = req.user.id;
 

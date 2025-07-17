@@ -1,14 +1,20 @@
 const Transaction = require('../models/Transaction');
 const Account = require('../models/Account');
 const Budget = require('../models/Budget');
-const errorHandler = require('../utils/errorHandler'); 
+const errorHandler = require('../utils/errorHandler');
 
-
+// router.post('/', auth, transactionController.createTransaction);
 exports.createTransaction = async (req, res) => {
     const { account, amount, type, category, description, date } = req.body;
     const userId = req.user.id;
 
     try {
+        // Validate amount to ensure it's a valid number
+        const parsedAmount = parseFloat(amount);
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+            return res.status(400).json({ message: 'Invalid amount provided. Amount must be a positive number.' });
+        }
+
         const targetAccount = await Account.findById(account);
 
         if (!targetAccount) {
@@ -22,34 +28,35 @@ exports.createTransaction = async (req, res) => {
         const newTransaction = new Transaction({
             user: userId,
             account,
-            amount,
+            amount: parsedAmount, // Use the parsed amount
             type,
-            category,
-            description,
-            date: date || Date.now()
+            category: category ? category.trim() : '', // Trim and handle potential null/undefined
+            description: description ? description.trim() : '', // Trim and handle potential null/undefined
+            date: date || new Date() // Use current date if not provided
         });
 
         const transaction = await newTransaction.save();
 
         if (type === 'income') {
-            targetAccount.currentBalance += amount;
+            targetAccount.currentBalance += parsedAmount;
         } else if (type === 'expense') {
-            targetAccount.currentBalance -= amount;
+            targetAccount.currentBalance -= parsedAmount;
         }
         await targetAccount.save();
 
-        if (type === 'expense' && category) {
+        // Only update budget for expenses with a valid category
+        if (type === 'expense' && category && category.trim() !== '') {
             const transactionDateObj = new Date(transaction.date);
 
             const budget = await Budget.findOneAndUpdate(
                 {
                     user: userId,
-                    category: category,
+                    category: category.trim(), // Use trimmed category for budget lookup
                     startDate: { $lte: transactionDateObj },
                     endDate: { $gte: transactionDateObj }
                 },
                 {
-                    $inc: { spentAmount: amount }
+                    $inc: { spentAmount: parsedAmount }
                 },
                 {
                     new: true,
@@ -58,9 +65,9 @@ exports.createTransaction = async (req, res) => {
             );
 
             if (budget) {
-                console.log(`Budget for ${category} updated. New spent amount: ${budget.spentAmount}`);
+                console.log(`Budget for ${category.trim()} updated. New spent amount: ${budget.spentAmount}`);
             } else {
-                console.log(`No budget found for category '${category}' for the transaction date.`);
+                console.log(`No budget found for category '${category.trim()}' for the transaction date.`);
             }
         }
 
@@ -98,12 +105,11 @@ exports.getTransactions = async (req, res) => {
         }
 
         const transactions = await Transaction.find(query)
-                                            .populate('account', ['name', 'type', 'currency'])
-                                            .sort({ date: -1, createdAt: -1 });
+            .populate('account', ['name', 'type', 'currency', 'currentBalance']) // Ensure currentBalance is populated
+            .sort({ date: -1, createdAt: -1 });
 
         res.json(transactions);
     } catch (err) {
-        // Use the new error handler
         errorHandler(err, res, 'Server error fetching transactions');
     }
 };
@@ -113,7 +119,7 @@ exports.getTransactions = async (req, res) => {
 // @access  Private
 exports.getTransactionById = async (req, res) => {
     try {
-        const transaction = await Transaction.findById(req.params.id).populate('account', ['name', 'type', 'currency']);
+        const transaction = await Transaction.findById(req.params.id).populate('account', ['name', 'type', 'currency', 'currentBalance']); // Ensure currentBalance is populated
 
         if (!transaction) {
             return res.status(404).json({ message: 'Transaction not found' });
@@ -124,7 +130,6 @@ exports.getTransactionById = async (req, res) => {
 
         res.json(transaction);
     } catch (err) {
-        // Use the new error handler
         errorHandler(err, res, 'Server error fetching transaction');
     }
 };
@@ -148,6 +153,12 @@ exports.updateTransaction = async (req, res) => {
             return res.status(403).json({ message: 'Not authorized to update this transaction' });
         }
 
+        // Validate amount for update as well
+        const parsedAmount = amount !== undefined ? parseFloat(amount) : transaction.amount;
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+            return res.status(400).json({ message: 'Invalid amount provided for update. Amount must be a positive number.' });
+        }
+
         const oldAmount = transaction.amount;
         const oldType = transaction.type;
         const oldCategory = transaction.category;
@@ -155,20 +166,21 @@ exports.updateTransaction = async (req, res) => {
         const oldAccountId = transaction.account.toString();
 
         transaction.account = account !== undefined ? account : transaction.account;
-        transaction.amount = amount !== undefined ? amount : transaction.amount;
+        transaction.amount = parsedAmount; // Use the parsed amount
         transaction.type = type !== undefined ? type : transaction.type;
-        transaction.category = category !== undefined ? category : transaction.category;
-        transaction.description = description !== undefined ? description : transaction.description;
+        transaction.category = category !== undefined ? (category ? category.trim() : '') : transaction.category;
+        transaction.description = description !== undefined ? (description ? description.trim() : '') : transaction.description;
         transaction.date = date !== undefined ? date : transaction.date;
 
         await transaction.save();
 
-        if (oldType === 'expense' && oldCategory) {
+        // Revert old budget if applicable
+        if (oldType === 'expense' && oldCategory && oldCategory.trim() !== '') {
             const oldTransactionDateObj = new Date(oldDate);
             await Budget.findOneAndUpdate(
                 {
                     user: userId,
-                    category: oldCategory,
+                    category: oldCategory.trim(),
                     startDate: { $lte: oldTransactionDateObj },
                     endDate: { $gte: oldTransactionDateObj }
                 },
@@ -176,12 +188,13 @@ exports.updateTransaction = async (req, res) => {
             );
         }
 
-        if (transaction.type === 'expense' && transaction.category) {
+        // Apply new budget update if applicable
+        if (transaction.type === 'expense' && transaction.category && transaction.category.trim() !== '') {
             const newTransactionDateObj = new Date(transaction.date);
             await Budget.findOneAndUpdate(
                 {
                     user: userId,
-                    category: transaction.category,
+                    category: transaction.category.trim(),
                     startDate: { $lte: newTransactionDateObj },
                     endDate: { $gte: newTransactionDateObj }
                 },
@@ -190,6 +203,7 @@ exports.updateTransaction = async (req, res) => {
             );
         }
 
+        // Update account balances only if account, amount, or type changed
         if (oldAccountId !== transaction.account.toString() || oldAmount !== transaction.amount || oldType !== transaction.type) {
             const oldAccount = await Account.findById(oldAccountId);
             if (oldAccount) {
@@ -215,7 +229,6 @@ exports.updateTransaction = async (req, res) => {
         res.json(transaction);
 
     } catch (err) {
-        // Use the new error handler
         errorHandler(err, res, 'Server error updating transaction');
     }
 };
@@ -238,12 +251,13 @@ exports.deleteTransaction = async (req, res) => {
             return res.status(403).json({ message: 'Not authorized to delete this transaction' });
         }
 
-        if (transaction.type === 'expense' && transaction.category) {
+        // Revert budget if applicable
+        if (transaction.type === 'expense' && transaction.category && transaction.category.trim() !== '') {
             const transactionDateObj = new Date(transaction.date);
             await Budget.findOneAndUpdate(
                 {
                     user: userId,
-                    category: transaction.category,
+                    category: transaction.category.trim(),
                     startDate: { $lte: transactionDateObj },
                     endDate: { $gte: transactionDateObj }
                 },
@@ -251,7 +265,7 @@ exports.deleteTransaction = async (req, res) => {
                     $inc: { spentAmount: -transaction.amount }
                 }
             );
-            console.log(`Budget for ${transaction.category} decremented due to transaction deletion.`);
+            console.log(`Budget for ${transaction.category.trim()} decremented due to transaction deletion.`);
         }
 
         const relatedAccount = await Account.findById(transaction.account);
@@ -269,7 +283,6 @@ exports.deleteTransaction = async (req, res) => {
         res.json({ message: 'Transaction removed successfully' });
 
     } catch (err) {
-        // Use the new error handler
         errorHandler(err, res, 'Server error deleting transaction');
     }
 };

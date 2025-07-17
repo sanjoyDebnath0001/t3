@@ -1,9 +1,10 @@
 // frontend/src/components/Layout.jsx
-import React, {useState} from 'react';
+import React, { useState } from 'react';
 import { Outlet, Link, useNavigate } from 'react-router-dom';
 import { Container, Button, Navbar, Nav } from 'react-bootstrap';
 import { jwtDecode } from 'jwt-decode';
 import FullLogo from './assets/FullLogo.jpg'
+
 const Layout = () => {
     const navigate = useNavigate();
     const token = localStorage.getItem('token');
@@ -31,13 +32,16 @@ const Layout = () => {
         <>
             <Navbar bg="dark" variant="dark" expand="lg">
                 <Container>
-                    <Navbar.Brand as={Link} to="/dashboard"><a><img src={FullLogo} className="photo" style={{ width: 50, height: 40,}}/></a>Kubaro</Navbar.Brand>
+                    <Navbar.Brand as={Link} to="/dashboard">
+                        <img src={FullLogo} className="photo" style={{ width: 50, height: 40, }} alt="Kubaro Logo" />
+                        {' Kubaro'}
+                    </Navbar.Brand>
                     <Navbar.Toggle aria-controls="basic-navbar-nav" />
                     <Navbar.Collapse id="basic-navbar-nav">
                         <Nav className="me-auto">
                             <Nav.Link as={Link} to="/dashboard">Overview</Nav.Link>
                             <Nav.Link as={Link} to="/budgets">Budgets</Nav.Link>
-                            <Nav.Link as={Link} to="/transaction">Transaction</Nav.Link> 
+                            <Nav.Link as={Link} to="/transaction">Transaction</Nav.Link>
                             <Nav.Link as={Link} to="/reports">Reports</Nav.Link>
                             <Nav.Link as={Link} to="/dreports">C Reports</Nav.Link>
                             <Nav.Link as={Link} to="/settings/profile">Settings</Nav.Link>
@@ -49,7 +53,7 @@ const Layout = () => {
                             )}
                         </Nav>
                         <Nav>
-                            <Button variant="outline-light" onClick={handleLogout}>Logout</Button>
+                            <Button variant="outline-light " className='bg-danger' onClick={handleLogout}>Logout</Button>
                         </Nav>
                     </Navbar.Collapse>
                 </Container>

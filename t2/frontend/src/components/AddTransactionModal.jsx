@@ -1,6 +1,4 @@
-// src/Component/AddTransactionModal.jsx
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react'; // Added useCallback
 import { Modal, Button, Form, Alert, Spinner } from 'react-bootstrap';
 import axiosInstance from '../setting/axiosInstance';
 
@@ -16,28 +14,31 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState(null);
 
+	// Memoize fetchAccounts to prevent unnecessary re-creations
+	const fetchAccounts = useCallback(async () => {
+		try {
+			setError(null);
+			setLoading(true);
+			const res = await axiosInstance.get('/accounts');
+			setAccounts(res.data);
+			if (res.data.length > 0) {
+				setSelectedAccount(res.data[0]._id); // Select the first account by default
+			} else {
+				setSelectedAccount(''); // Ensure it's empty if no accounts
+			}
+		} catch (err) {
+			console.error('Error fetching accounts:', err);
+			setError(err.response?.data?.message || 'Failed to load accounts. Please try again.');
+		} finally {
+			setLoading(false);
+		}
+	}, []); // No dependencies for useCallback, as it's meant to fetch all accounts
 
 	useEffect(() => {
 		if (show) {
-			const fetchAccounts = async () => {
-				try {
-					setError(null);
-					setLoading(true);
-					const res = await axiosInstance.get('/accounts');
-					setAccounts(res.data);
-					if (res.data.length > 0) {
-						setSelectedAccount(res.data[0]._id); // Select the first account by default
-					}
-				} catch (err) {
-					console.error('Error fetching accounts:', err);
-					setError('Failed to load accounts. Please try again.');
-				} finally {
-					setLoading(false);
-				}
-			};
-			fetchAccounts();
+			fetchAccounts(); // Fetch accounts only when the modal becomes visible
 		}
-	}, [show]);
+	}, [show, fetchAccounts]); // Depend on 'show' and the memoized 'fetchAccounts'
 
 	// Reset form fields when modal is opened or closed
 	useEffect(() => {
@@ -45,12 +46,9 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 			setAmount('');
 			setCategory('');
 			setDescription('');
-			setDate('');
+			// setSelectedAccount(''); // Do not reset, let fetchAccounts handle initial selection when opening
+			setType('expense'); // Reset type to default
 			setError(null);
-			// Re-select first account if available when reopened
-			if (accounts.length > 0) {
-				setSelectedAccount(accounts[0]._id);
-			}
 		} else { // When modal opens, set default date to today
 			const today = new Date();
 			const year = today.getFullYear();
@@ -58,16 +56,28 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 			const day = String(today.getDate()).padStart(2, '0');
 			setDate(`${year}-${month}-${day}`);
 		}
-	}, [show, accounts]);
-
+	}, [show]); // Only depend on 'show'
 
 	const handleSubmit = async (e) => {
 		e.preventDefault();
 		setError(null);
 		setLoading(true);
 
-		if (!selectedAccount || !type || !amount || !category || !date) {
-			setError('Please fill in all required fields: Account, Type, Amount, Category, and Date.');
+		if (!selectedAccount) {
+			setError('Please select an account.');
+			setLoading(false);
+			return;
+		}
+
+		if (!type || !amount || !category || !date) {
+			setError('Please fill in all required fields: Type, Amount, Category, and Date.');
+			setLoading(false);
+			return;
+		}
+
+		const parsedAmount = parseFloat(amount);
+		if (isNaN(parsedAmount) || parsedAmount <= 0) {
+			setError('Please enter a valid positive amount.');
 			setLoading(false);
 			return;
 		}
@@ -75,9 +85,9 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 		const transactionData = {
 			account: selectedAccount,
 			type,
-			amount: parseFloat(amount), // Ensure amount is a number
-			category,
-			description,
+			amount: parsedAmount,
+			category: category.trim(), // Trim category to avoid issues with extra spaces
+			description: description.trim(), // Trim description
 			date // Send date in YYYY-MM-DD format; backend will parse
 		};
 
@@ -118,7 +128,11 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 							) : (
 								accounts.map(acc => (
 									<option key={acc._id} value={acc._id}>
-										{acc.name} ({acc.currency} {acc.currentBalance.toFixed(2)})
+										{acc.name} ({acc.currency || 'INR'} { // Added currency fallback
+											acc.currentBalance !== null && acc.currentBalance !== undefined
+												? acc.currentBalance.toFixed(2)
+												: '0.00' // Provide a default if currentBalance is null/undefined
+										})
 									</option>
 								))
 							)}
@@ -188,7 +202,7 @@ const AddTransactionModal = ({ show, handleClose, onTransactionAdded }) => {
 						/>
 					</Form.Group>
 
-					<Button variant="primary" type="submit" disabled={loading}>
+					<Button variant="primary" type="submit" disabled={loading || accounts.length === 0}>
 						{loading ? <Spinner animation="border" size="sm" /> : 'Add Transaction'}
 					</Button>
 				</Form>

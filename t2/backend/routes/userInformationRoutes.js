@@ -16,7 +16,7 @@ router.get('/:id', auth, userInformationController.getUserInformationById);
 // @route   POST /api/userinfo
 // @desc    Create a new user information profile
 // @access  Private
-router.post('/', auth, userInformationController.createOrUpdateUserInformation);
+//router.post('/', auth, userInformationController.createOrUpdateUserInformation);
 
 // @route   PUT /api/userinfo/:id
 // @desc    Update a user's profile details

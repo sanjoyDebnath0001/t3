@@ -1,48 +1,52 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+// frontend/src/components/ReportGenerator.jsx
+import React, { useState, useEffect, useCallback } from 'react';
+import axios from 'axios'; // Still import axios, though axiosInstance is preferred
 import { Container, Card, Form, Button, Alert, Row, Col, Spinner, ListGroup } from 'react-bootstrap';
-import { Bar, Pie, Line } from 'react-chartjs-2';
-import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, ArcElement, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+import { Line } from 'react-chartjs-2'; // Only Line chart needed now
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js'; // Removed BarElement, ArcElement
 import axiosInstance from '../setting/axiosInstance';
 import { useNavigate } from 'react-router-dom';
 
-// Register Chart.js components
-ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, PointElement, LineElement, Title, Tooltip, Legend);
-
+// Register Chart.js components - updated to only include what's needed for Line chart
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
 const ReportGenerator = () => {
     const navigate = useNavigate();
 
-    const [reportType, setReportType] = useState('expenses-by-category');
+    // State for report generation parameters
+    const [reportType, setReportType] = useState('transaction-trends'); 
     const [period, setPeriod] = useState('monthly');
     const [year, setYear] = useState(new Date().getFullYear());
     const [month, setMonth] = useState(new Date().getMonth()); // 0-indexed for JS Date
-    const [transactionFilterType, setTransactionFilterType] = useState('expense'); // NEW STATE for 'transaction-trends' type filter
+    // New states for custom date range
+    const [startDate, setStartDate] = useState(''); // YYYY-MM-DD format for input type="date"
+    const [endDate, setEndDate] = useState(''); // YYYY-MM-DD format for input type="date"
+    // transactionTrendsFilterType remains, as it's for the only remaining report type
+    const [transactionFilterType, setTransactionFilterType] = useState(null);
+
+    // State for fetched report data and UI feedback
     const [reportData, setReportData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    const [message, setMessage] = useState('');
+    const [message, setMessage] = useState(''); // Used for success messages or specific info alerts
 
     const currentYear = new Date().getFullYear();
+    // Generate years for dropdown: current year and the past 4 years
     const years = Array.from({ length: 5 }, (_, i) => currentYear - i);
     const months = [
         { value: 0, name: 'January' }, { value: 1, name: 'February' }, { value: 2, name: 'March' },
         { value: 3, name: 'April' }, { value: 4, name: 'May' }, { value: 5, name: 'June' },
         { value: 6, name: 'July' }, { value: 7, name: 'August' }, { value: 8, name: 'September' },
-        { value: 9, name: 'October' }, { value: 10, name: 'November' }, { value: 11, name: 'December' }
+        { value: 9, name: 'October' }, { value: 10, name: 'November' }, { value: 11, 'name': 'December' }
     ];
 
-    useEffect(() => {
-        // Fetch report on initial load or when filters change
-        // Added transactionFilterType to dependencies to re-fetch when it changes
-        fetchReportData();
-    }, [reportType, period, year, month, transactionFilterType]);
-
-    const fetchReportData = async () => {
+    // useCallback to memoize fetchReportData, preventing unnecessary re-creations
+    // This is especially useful if it were passed down to child components
+    const fetchReportData = useCallback(async () => {
         setLoading(true);
         setError('');
         setMessage('');
-        setReportData(null); // Clear previous data
+        setReportData(null); // Clear previous data before new fetch
 
         const token = localStorage.getItem('token');
 
@@ -55,47 +59,68 @@ const ReportGenerator = () => {
             return;
         }
 
+        let url = '';
+        // Only transaction-trends case remains
+        if (reportType === 'transaction-trends') {
+            url = '/reports/transaction-trends';
+        } else {
+            // This case should ideally not be hit with the updated reportType state default
+            setError('Invalid report type selected.');
+            setLoading(false);
+            return;
+        }
+
         try {
-            const config = {
-                headers: { 'x-auth-token': token }
-            };
+            const requestParams = {};
 
-            let url = `/dashboard/reports/${reportType}`;
-            const params = new URLSearchParams();
-            params.append('period', period);
-            params.append('year', year);
-
-            // FIX: Adjust month to be 1-indexed for backend if required
-            if (period === 'monthly' || period === 'quarterly') {
-                params.append('month', month + 1); // IMPORTANT: Add 1 for 1-indexed month
+            // Determine parameters based on the selected period
+            if (period === 'custom') {
+                if (!startDate || !endDate) {
+                    setError('Please select both start and end dates for a custom range.');
+                    setLoading(false);
+                    return;
+                }
+                if (new Date(startDate) > new Date(endDate)) {
+                    setError('Start date cannot be after end date.');
+                    setLoading(false);
+                    return;
+                }
+                requestParams.period = period; // Send 'custom'
+                requestParams.startDate = startDate;
+                requestParams.endDate = endDate;
+            } else {
+                requestParams.period = period;
+                requestParams.year = year;
+                if (period === 'monthly' || period === 'quarterly') {
+                    requestParams.month = month + 1; // IMPORTANT: Add 1 for 1-indexed month
+                }
             }
 
-            // FIX: Correctly append 'type' for transaction-trends using the new state
+            // Conditionally append 'type' for 'transaction-trends' report
             if (reportType === 'transaction-trends') {
                 if (!transactionFilterType) {
                     setError("Please select a transaction type (Expense/Income) for the trends report.");
                     setLoading(false);
                     return;
                 }
-                params.append('type', transactionFilterType);
+                requestParams.type = transactionFilterType;
             }
 
-            url += `?${params.toString()}`;
-
-            
-            console.log('Constructed API Request URL:', url);
-            console.log('Parameters being sent:', {
-                reportType,
-                period,
-                year,
-                month: (period === 'monthly' || period === 'quarterly') ? month + 1 : undefined, // Log 1-indexed month
-                transactionFilterType: reportType === 'transaction-trends' ? transactionFilterType : undefined
-            });
-            // --- End Debugging Logs ---
+            const config = {
+                headers: { 'x-auth-token': token },
+                params: requestParams // Pass the parameters object here
+            };
 
             const res = await axiosInstance.get(url, config);
             setReportData(res.data);
             setLoading(false);
+            // Optionally set a success message here if data is received
+            if (res.data && Object.keys(res.data).length > 0) {
+                setMessage('Report data loaded successfully.');
+            } else {
+                setMessage('No data found for the selected criteria. Try adjusting the filters or adding more transactions.');
+            }
+
         } catch (err) {
             if (err.response) {
                 console.error("API Error Response:", err.response.data); // Log full error response from backend
@@ -103,72 +128,60 @@ const ReportGenerator = () => {
 
                 if (err.response.status === 401 || err.response.status === 403) {
                     setError('Session expired or unauthorized. Please log in again.');
-                    localStorage.removeItem('token');
+                    localStorage.removeItem('token'); // Clear invalid token
                     setTimeout(() => {
                         navigate('/login');
                     }, 1500);
                 } else if (err.response.status === 400) {
                     setError(err.response.data.msg || 'Bad Request: Check your report parameters.'); // Display specific 400 message
-                } else {
+                } else if (err.response.status === 404) {
+                    setError('Report endpoint not found. This might be a backend routing issue or incorrect report type. Check the URL and backend routes.');
+                }
+                else {
                     setError(err.response.data.msg || 'Failed to fetch report data.');
                 }
             } else {
-                setError('Network error or server unreachable.');
+                setError('Network error or server unreachable. Please check your internet connection.');
             }
             setLoading(false);
             console.error(err);
-            
         }
-    };
+    }, [reportType, period, year, month, startDate, endDate, transactionFilterType, navigate]); // Added startDate, endDate to deps
 
-    // Chart Data and Options remain mostly the same, but ensure they use reportData values
+    useEffect(() => {
+        fetchReportData();
+    }, [fetchReportData]);
+
     const getChartData = () => {
         if (!reportData) return {};
 
-        switch (reportType) {
-            case 'expenses-by-category':
-            case 'income-by-category':
-                const categoryData = reportType === 'expenses-by-category' ? reportData.expensesByCategory : reportData.incomeByCategory;
-                if (!categoryData || categoryData.length === 0) return {};
-                const labels = categoryData.map(item => item._id);
-                const data = categoryData.map(item => item.totalAmount);
-                const backgroundColor = data.map(() => `rgba(${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, 0.6)`);
-                const borderColor = backgroundColor.map(color => color.replace('0.6', '1'));
-
-                return {
-                    labels: labels,
-                    datasets: [{
-                        label: `Total Amount (${reportType === 'expenses-by-category' ? 'Expenses' : 'Income'})`,
-                        data: data,
-                        backgroundColor: backgroundColor,
-                        borderColor: borderColor,
-                        borderWidth: 1,
-                    }]
-                };
-            case 'transaction-trends':
-                // Use `transactionFilterType` for label in chart, but `reportData.type` for data (which should match)
-                const trendReportData = reportData.trends;
-                if (!trendReportData || trendReportData.length === 0) return {};
-
-                const trendLabels = trendReportData.map(item => item._id);
-                const trendAmounts = trendReportData.map(item => item.totalAmount);
-                const trendColor = transactionFilterType === 'expense' ? 'rgba(255, 99, 132, 0.8)' : 'rgba(75, 192, 192, 0.8)';
-                const trendBorderColor = transactionFilterType === 'expense' ? 'rgba(255, 99, 132, 1)' : 'rgba(75, 192, 192, 1)';
-
-                return {
-                    labels: trendLabels,
-                    datasets: [{
-                        label: `${transactionFilterType.charAt(0).toUpperCase() + transactionFilterType.slice(1)} Trend`,
-                        data: trendAmounts,
-                        fill: false,
-                        borderColor: trendBorderColor,
-                        backgroundColor: trendColor,
-                        tension: 0.1
-                    }]
-                };
-            default:
+        // Only transaction-trends case remains
+        if (reportType === 'transaction-trends') {
+            const trendReportData = reportData.trends;
+            if (!trendReportData || trendReportData.length === 0) {
                 return {};
+            }
+
+            // For custom periods, trend _id might be dates like YYYY-MM-DD.
+            // Ensure the backend groups trends appropriately for custom ranges.
+            const trendLabels = trendReportData.map(item => item._id);
+            const trendAmounts = trendReportData.map(item => item.totalAmount);
+            const trendColor = transactionFilterType === 'expense' ? 'rgba(255, 99, 132, 0.8)' : 'rgba(75, 192, 192, 0.8)';
+            const trendBorderColor = transactionFilterType === 'expense' ? 'rgba(255, 99, 132, 1)' : 'rgba(75, 192, 192, 1)';
+
+            return {
+                labels: trendLabels,
+                datasets: [{
+                    label: `${transactionFilterType.charAt(0).toUpperCase() + transactionFilterType.slice(1)} Trend`,
+                    data: trendAmounts,
+                    fill: false,
+                    borderColor: trendBorderColor,
+                    backgroundColor: trendColor,
+                    tension: 0.1
+                }]
+            };
         }
+        return {}; // Should not be reached with the current reportType state
     };
 
     const getChartOptions = (chartTitle) => {
@@ -191,7 +204,7 @@ const ReportGenerator = () => {
                                 label += ': ';
                             }
                             if (context.parsed.y !== null) {
-                                label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y);
+                                return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(context.parsed.y);
                             }
                             return label;
                         }
@@ -203,7 +216,7 @@ const ReportGenerator = () => {
                     beginAtZero: true,
                     ticks: {
                         callback: function (value) {
-                            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
+                            return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
                         }
                     }
                 }
@@ -212,34 +225,33 @@ const ReportGenerator = () => {
     };
 
     const handleExportCSV = () => {
-        if (!reportData) {
-            setError("No data to export.");
-            return;
-        }
-
-        let csvContent = "";
+        let dataToExport = [];
         let filename = `${reportType}-report.csv`;
+        let headers = "";
 
-        if (reportType === 'expenses-by-category' && reportData.expensesByCategory) {
-            csvContent += "Category,Total Amount,Count\n";
-            reportData.expensesByCategory.forEach(item => {
-                csvContent += `${item._id},${item.totalAmount.toFixed(2)},${item.count}\n`;
-            });
-        } else if (reportType === 'income-by-category' && reportData.incomeByCategory) {
-            csvContent += "Category,Total Amount,Count\n";
-            reportData.incomeByCategory.forEach(item => {
-                csvContent += `${item._id},${item.totalAmount.toFixed(2)},${item.count}\n`;
-            });
-        } else if (reportType === 'transaction-trends' && reportData.trends) {
-            csvContent += "Period,Total Amount\n";
-            reportData.trends.forEach(item => {
-                csvContent += `${item._id},${item.totalAmount.toFixed(2)}\n`;
-            });
-            filename = `${transactionFilterType}-trends-${period}-report.csv`; // Use filter type for filename
+        // Only transaction-trends export logic remains
+        if (reportType === 'transaction-trends' && reportData?.trends?.length > 0) {
+            dataToExport = reportData.trends;
+            headers = "Period,Total Amount\n";
+            // Adjust filename for custom ranges if needed, e.g., include dates
+            filename = `${transactionFilterType}-trends-${period === 'custom' ? `${startDate}_to_${endDate}` : period}-report.csv`;
         } else {
-            setError("Unsupported report type for CSV export or no data.");
+            setError("No data found for the selected report type to export.");
             return;
         }
+
+        if (dataToExport.length === 0) {
+            setError("No data found for the selected criteria to export.");
+            return;
+        }
+
+        let csvContent = headers;
+        dataToExport.forEach(item => {
+            if (reportType === 'transaction-trends') {
+                // Ensure _id for trends is suitable for CSV (e.g., date string)
+                csvContent += `${item._id},${item.totalAmount.toFixed(2)}\n`;
+            }
+        });
 
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement("a");
@@ -251,27 +263,36 @@ const ReportGenerator = () => {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+            setMessage("Report exported to CSV successfully!");
+        } else {
+            setError("Your browser does not support downloading files directly.");
         }
-        setMessage("Report exported to CSV!");
     };
 
+    // Simplify hasReportData check
+    const hasReportData = reportData && (reportType === 'transaction-trends' && reportData.trends && reportData.trends.length > 0);
 
     return (
         <Container className="mt-5">
-            <Card className="mb-4">
+            <Card className="mb-4 shadow-sm">
                 <Card.Body>
-                    <h2 className="text-center mb-4">Financial Reports & Analytics</h2>
-                    {error && <Alert variant="danger">{error}</Alert>}
-                    {message && <Alert variant="success">{message}</Alert>}
+                    <h2 className="text-center mb-4 text-primary">Financial Reports & Analytics</h2>
+                    {error && <Alert variant="danger" className="text-center">{error}</Alert>}
+                    {message && !error && <Alert variant="info" className="text-center">{message}</Alert>}
 
                     <Form>
                         <Row className="mb-3 align-items-end">
                             <Col md={4}>
                                 <Form.Group controlId="reportType">
                                     <Form.Label>Select Report</Form.Label>
-                                    <Form.Select value={reportType} onChange={e => setReportType(e.target.value)}>
-                                        <option value="expenses-by-category">Expenses by Category</option>
-                                        <option value="income-by-category">Income by Category</option>
+                                    <Form.Select
+                                        value={reportType}
+                                        onChange={e => {
+                                            setReportType(e.target.value);
+                                            // No need for conditional logic here as only one report type is available
+                                        }}
+                                        disabled // Disable the report type selection as only one option remains
+                                    >
                                         <option value="transaction-trends">Transaction Trends</option>
                                     </Form.Select>
                                 </Form.Group>
@@ -283,30 +304,60 @@ const ReportGenerator = () => {
                                         <option value="monthly">Monthly</option>
                                         <option value="quarterly">Quarterly</option>
                                         <option value="annually">Annually</option>
+                                        <option value="custom">Custom Range</option>
                                     </Form.Select>
                                 </Form.Group>
                             </Col>
-                            <Col md={2}>
-                                <Form.Group controlId="year">
-                                    <Form.Label>Year</Form.Label>
-                                    <Form.Select value={year} onChange={e => setYear(e.target.value)}>
-                                        {years.map(y => <option key={y} value={y}>{y}</option>)}
-                                    </Form.Select>
-                                </Form.Group>
-                            </Col>
-                            {(period === 'monthly' || period === 'quarterly') && (
-                                <Col md={3}>
-                                    <Form.Group controlId="month">
-                                        <Form.Label>Month (for Monthly/Quarterly)</Form.Label>
-                                        <Form.Select value={month} onChange={e => setMonth(e.target.value)}>
-                                            {months.map(m => (
-                                                <option key={m.value} value={m.value}>{m.name}</option>
-                                            ))}
-                                        </Form.Select>
-                                    </Form.Group>
-                                </Col>
+                            {period !== 'custom' && (
+                                <>
+                                    <Col md={2}>
+                                        <Form.Group controlId="year">
+                                            <Form.Label>Year</Form.Label>
+                                            <Form.Select value={year} onChange={e => setYear(Number(e.target.value))}>
+                                                {years.map(y => <option key={y} value={y}>{y}</option>)}
+                                            </Form.Select>
+                                        </Form.Group>
+                                    </Col>
+                                    {(period === 'monthly' || period === 'quarterly') && (
+                                        <Col md={3}>
+                                            <Form.Group controlId="month">
+                                                <Form.Label>Month (for Monthly/Quarterly)</Form.Label>
+                                                <Form.Select value={month} onChange={e => setMonth(Number(e.target.value))}>
+                                                    {months.map(m => (
+                                                        <option key={m.value} value={m.value}>{m.name}</option>
+                                                    ))}
+                                                </Form.Select>
+                                            </Form.Group>
+                                        </Col>
+                                    )}
+                                </>
                             )}
-                            {/* FIX: Use the new transactionFilterType state for this dropdown */}
+
+                            {period === 'custom' && (
+                                <>
+                                    <Col md={3}>
+                                        <Form.Group controlId="startDate">
+                                            <Form.Label>Start Date</Form.Label>
+                                            <Form.Control
+                                                type="date"
+                                                value={startDate}
+                                                onChange={e => setStartDate(e.target.value)}
+                                            />
+                                        </Form.Group>
+                                    </Col>
+                                    <Col md={3}>
+                                        <Form.Group controlId="endDate">
+                                            <Form.Label>End Date</Form.Label>
+                                            <Form.Control
+                                                type="date"
+                                                value={endDate}
+                                                onChange={e => setEndDate(e.target.value)}
+                                            />
+                                        </Form.Group>
+                                    </Col>
+                                </>
+                            )}
+
                             {reportType === 'transaction-trends' && (
                                 <Col md={3}>
                                     <Form.Group controlId="trendType">
@@ -315,7 +366,6 @@ const ReportGenerator = () => {
                                             value={transactionFilterType}
                                             onChange={e => setTransactionFilterType(e.target.value)}
                                         >
-                                            <option value="">Select Type</option> {/* Allow selecting empty if optional backend */}
                                             <option value="expense">Expense</option>
                                             <option value="income">Income</option>
                                         </Form.Select>
@@ -323,23 +373,34 @@ const ReportGenerator = () => {
                                 </Col>
                             )}
                         </Row>
+                        <Row>
+                            <Col className="d-grid">
+                                <Button
+                                    variant="primary"
+                                    onClick={fetchReportData}
+                                    disabled={loading}
+                                >
+                                    {loading ? <Spinner animation="border" size="sm" /> : 'Generate Report'}
+                                </Button>
+                            </Col>
+                        </Row>
                     </Form>
                 </Card.Body>
             </Card>
 
             {loading && (
                 <div className="text-center mt-5">
-                    <Spinner animation="border" role="status">
+                    <Spinner animation="border" role="status" variant="primary">
                         <span className="visually-hidden">Loading report...</span>
                     </Spinner>
-                    <p className="mt-3">Generating your report...</p>
+                    <p className="mt-3 text-muted">Generating your report, please wait...</p>
                 </div>
             )}
 
             {!loading && reportData && (
-                <Card className="mt-4">
+                <Card className="mt-4 shadow-sm">
                     <Card.Body>
-                        <h3 className="mb-4 text-center">Report Results</h3>
+                        <h3 className="mb-4 text-center text-secondary">Report Results</h3>
                         {reportData.startDate && reportData.endDate && (
                             <p className="text-center text-muted">
                                 Data from: {new Date(reportData.startDate).toLocaleDateString()} to {new Date(reportData.endDate).toLocaleDateString()}
@@ -347,56 +408,19 @@ const ReportGenerator = () => {
                         )}
                         <hr />
 
-                        {/* Render Charts */}
-                        {reportType === 'expenses-by-category' && reportData.expensesByCategory && reportData.expensesByCategory.length > 0 && (
+                        {reportType === 'transaction-trends' && reportData.trends?.length > 0 && (
                             <>
-                                <h4 className="mt-4">Expenses by Category Chart</h4>
-                                <div style={{ height: '400px' }}>
-                                    <Pie data={getChartData()} options={getChartOptions('Expenses by Category')} />
-                                </div>
-                                <h5 className="mt-4">Detailed Breakdown:</h5>
-                                <ListGroup>
-                                    {reportData.expensesByCategory.map((item, index) => (
-                                        <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
-                                            {item._id}:
-                                            <span className="badge bg-danger">${item.totalAmount.toFixed(2)} ({item.count} items)</span>
-                                        </ListGroup.Item>
-                                    ))}
-                                </ListGroup>
-                            </>
-                        )}
-
-                        {reportType === 'income-by-category' && reportData.incomeByCategory && reportData.incomeByCategory.length > 0 && (
-                            <>
-                                <h4 className="mt-4">Income by Category Chart</h4>
-                                <div style={{ height: '400px' }}>
-                                    <Pie data={getChartData()} options={getChartOptions('Income by Category')} />
-                                </div>
-                                <h5 className="mt-4">Detailed Breakdown:</h5>
-                                <ListGroup>
-                                    {reportData.incomeByCategory.map((item, index) => (
-                                        <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
-                                            {item._id}:
-                                            <span className="badge bg-success">${item.totalAmount.toFixed(2)} ({item.count} items)</span>
-                                        </ListGroup.Item>
-                                    ))}
-                                </ListGroup>
-                            </>
-                        )}
-
-                        {reportType === 'transaction-trends' && reportData.trends && reportData.trends.length > 0 && (
-                            <>
-                                <h4 className="mt-4">{transactionFilterType.charAt(0).toUpperCase() + transactionFilterType.slice(1)} Trends Over Time</h4>
-                                <div style={{ height: '400px' }}>
+                                <h4 className="mt-4 text-center text-info">{transactionFilterType.charAt(0).toUpperCase() + transactionFilterType.slice(1)} Trends Over Time</h4>
+                                <div style={{ height: '400px' }} className="mb-4">
                                     <Line data={getChartData()} options={getChartOptions(`${transactionFilterType.charAt(0).toUpperCase() + transactionFilterType.slice(1)} Trends`)} />
                                 </div>
                                 <h5 className="mt-4">Detailed Trends:</h5>
-                                <ListGroup>
+                                <ListGroup className="mb-4">
                                     {reportData.trends.map((item, index) => (
                                         <ListGroup.Item key={index} className="d-flex justify-content-between align-items-center">
-                                            {item._id}:
+                                            <strong>{item._id}:</strong>
                                             <span className={`badge ${transactionFilterType === 'income' ? 'bg-success' : 'bg-danger'}`}>
-                                                ${item.totalAmount.toFixed(2)}
+                                                {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(item.totalAmount)}
                                             </span>
                                         </ListGroup.Item>
                                     ))}
@@ -404,18 +428,18 @@ const ReportGenerator = () => {
                             </>
                         )}
 
-                        {/* No data message */}
-                        {((reportType === 'expenses-by-category' && (!reportData.expensesByCategory || reportData.expensesByCategory.length === 0)) ||
-                            (reportType === 'income-by-category' && (!reportData.incomeByCategory || reportData.incomeByCategory.length === 0)) ||
-                            (reportType === 'transaction-trends' && (!reportData.trends || reportData.trends.length === 0))) && (
-                                <Alert variant="info" className="text-center mt-4">
-                                    No data found for the selected criteria. Try adjusting the filters or adding more transactions.
-                                </Alert>
-                            )}
+                        {!hasReportData && !loading && (
+                            <Alert variant="info" className="text-center mt-4">
+                                No data found for the selected criteria. Try adjusting the filters or adding more transactions.
+                            </Alert>
+                        )}
 
-                        {/* Export Button */}
                         <div className="d-grid gap-2 mt-4">
-                            <Button variant="outline-dark" onClick={handleExportCSV}>
+                            <Button
+                                variant="outline-dark"
+                                onClick={handleExportCSV}
+                                disabled={!hasReportData || loading}
+                            >
                                 Export to CSV
                             </Button>
                         </div>

@@ -9,8 +9,8 @@ import axiosInstance from '../setting/axiosInstance.js';
 
 // API Endpoints - It's good practice to centralize these.
 const API_PROFILE = '/userinfo/';
-const API_ACCOUNTS = '/accounts/'; // Plural for fetching all accounts or creating a new one
-const API_SINGLE_ACCOUNT = (id) => `/accounts/${id}`; // Function for a specific account by ID
+const API_ACCOUNTS = '/accounts/';
+const API_SINGLE_ACCOUNT = (id) => `/accounts/${id}`;
 
 const ProfileSettings = () => {
     // --- State for Profile Management ---
@@ -40,7 +40,7 @@ const ProfileSettings = () => {
     const [accountFormData, setAccountFormData] = useState({
         accountName: '',
         accountType: '',
-        balance: '', // Keep as string for input, parse to float for API
+        currentBalance: '', // Changed from 'balance' to 'currentBalance' for consistency
     });
     const [originalAccountData, setOriginalAccountData] = useState(null); // To revert changes for account
     const [accountMessage, setAccountMessage] = useState('');
@@ -100,10 +100,7 @@ const ProfileSettings = () => {
         }
     }, [navigate]);
 
-    /**
-     * Fetches the user's primary account data from the API.
-     * Assumes the API returns an array and we take the first one for simplicity.
-     */
+
     const fetchAccount = useCallback(async () => {
         setAccountLoading(true);
         setAccountError('');
@@ -121,16 +118,16 @@ const ProfileSettings = () => {
             if (res.data && res.data.length > 0) {
                 const firstAccount = res.data[0];
                 const fetchedAccountData = {
-                    accountName: firstAccount.name || '', // Assuming 'name' from API
-                    accountType: firstAccount.type || '', // Assuming 'type' from API
-                    balance: firstAccount.balance?.toString() || '', // Store as string for input
+                    accountName: firstAccount.name || '',
+                    accountType: firstAccount.type || '',
+                    currentBalance: firstAccount.currentBalance?.toString() || '', // Ensure it's a string for the input
                 };
                 setAccountFormData(fetchedAccountData);
                 setOriginalAccountData(fetchedAccountData);
                 setCurrentAccountId(firstAccount._id);
             } else {
                 setAccountMessage('No account found. You can create one below.');
-                setAccountFormData({ accountName: '', accountType: '', balance: '' });
+                setAccountFormData({ accountName: '', accountType: '', currentBalance: '' }); // FIX: Changed 'balance' to 'currentBalance'
                 setOriginalAccountData(null);
                 setCurrentAccountId(null);
             }
@@ -267,7 +264,7 @@ const ProfileSettings = () => {
             const accountPayload = {
                 name: accountFormData.accountName, // Ensure consistency with backend API fields
                 type: accountFormData.accountType,  // Ensure consistency with backend API fields
-                balance: parseFloat(accountFormData.balance), // Parse to number for API
+                currentBalance: parseFloat(accountFormData.currentBalance), // Parse to number for API
             };
 
             let res;
@@ -287,7 +284,7 @@ const ProfileSettings = () => {
             const updatedAccount = {
                 accountName: res.data.name,
                 accountType: res.data.type,
-                balance: res.data.balance?.toString(), // Store as string for input
+                currentBalance: res.data.currentBalance?.toString(), // Store as string for input
             };
             setAccountFormData(updatedAccount);
             setOriginalAccountData(updatedAccount);
@@ -328,8 +325,7 @@ const ProfileSettings = () => {
             await axiosInstance.delete(API_SINGLE_ACCOUNT(currentAccountId));
 
             setAccountMessage('Account deleted successfully!');
-            // Corrected: changed setAccountData to setAccountFormData
-            setAccountFormData({ accountName: '', accountType: '', balance: '' });
+            setAccountFormData({ accountName: '', accountType: '', currentBalance: '' }); // FIX: Changed 'balance' to 'currentBalance'
             setOriginalAccountData(null);
             setCurrentAccountId(null);
             setShowAccountModal(false);
@@ -349,7 +345,7 @@ const ProfileSettings = () => {
         if (originalAccountData) {
             setAccountFormData(originalAccountData);
         } else {
-            setAccountFormData({ accountName: '', accountType: '', balance: '' });
+            setAccountFormData({ accountName: '', accountType: '', currentBalance: '' }); // FIX: Changed 'balance' to 'currentBalance'
         }
         setAccountError('');
         setAccountMessage('');
@@ -526,7 +522,12 @@ const ProfileSettings = () => {
                         <>
                             <h5 className="text-xl font-medium text-gray-800">Account Name: {accountFormData.accountName}</h5>
                             <p className="text-gray-600"><strong>Account Type:</strong> {accountFormData.accountType}</p>
-                            <p className="text-gray-600"><strong>Balance:</strong> ${parseFloat(accountFormData.balance).toFixed(2)}</p>
+                            <p className="text-gray-600">
+                                <strong>Balance:</strong> ₹
+                                {accountFormData.currentBalance !== '' && !isNaN(parseFloat(accountFormData.currentBalance))
+                                    ? parseFloat(accountFormData.currentBalance).toFixed(2) // Added .toFixed(2) and a check
+                                    : '0.00'}
+                            </p>
                             <div className="d-flex justify-content-end mt-3">
                                 <Button
                                     variant="primary"
@@ -558,7 +559,7 @@ const ProfileSettings = () => {
                                 onClick={() => {
                                     setShowAccountModal(true);
                                     // Reset form for new account creation
-                                    setAccountFormData({ accountName: '', accountType: '', balance: '' });
+                                    setAccountFormData({ accountName: '', accountType: '', currentBalance: '' }); // FIX: Changed 'balance' to 'currentBalance'
                                     setOriginalAccountData(null); // No original data for a new account
                                     setCurrentAccountId(null); // Ensure no ID is set for new account
                                     setAccountMessage('');
@@ -611,8 +612,8 @@ const ProfileSettings = () => {
                                 type="number"
                                 step="0.01"
                                 placeholder="0.00"
-                                name="balance"
-                                value={accountFormData.balance}
+                                name="currentBalance" // FIX: Changed 'name' to 'currentBalance' to match state
+                                value={accountFormData.currentBalance}
                                 onChange={onAccountChange}
                                 disabled={isSavingAccount}
                                 className="rounded-md"

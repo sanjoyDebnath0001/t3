@@ -1,48 +1,96 @@
 // frontend/src/components/ReportsPage.jsx
 import React, { useState } from 'react';
-import axios from 'axios';
+// axios is typically imported if you're using it directly, but axiosInstance
+// usually wraps it. Keeping it commented out if axiosInstance is sufficient.
+// import axios from 'axios';
 import { Container, Card, Button, Form, Alert, Row, Col, ListGroup, Tab, Tabs, Spinner } from 'react-bootstrap';
-import axiosInstance from '../setting/axiosInstance';
-import ReportGenerator from './ReportGenerator';
+import axiosInstance from '../setting/axiosInstance'; // Make sure this path is correct
+import ReportGenerator from './ReportGenerator'; // Assuming this component handles the 'dynamic-reports' tab
+import { useNavigate } from 'react-router-dom';
 
 const ReportsPage = () => {
+    const navigate = useNavigate(); // For navigation on auth errors
+
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
-    const [spendingReport, setSpendingReport] = useState(null);
-    const [incomeReport, setIncomeReport] = useState(null);
+    const [spendingReport, setSpendingReport] = useState(null); // Stores expenses by category
+    const [incomeReport, setIncomeReport] = useState(null);   // Stores income by category
     const [netIncomeReport, setNetIncomeReport] = useState(null);
-    const [loading, setLoading] = useState(false);
+    const [loadingDateRange, setLoadingDateRange] = useState(false); // Specific loading state for date range tab
     const [error, setError] = useState('');
     const [activeTab, setActiveTab] = useState('date-range'); // Default to 'date-range' reports
 
-    const fetchReport = async (reportType) => {
-        setLoading(true);
+    // Helper function to safely format numbers, preventing 'toFixed is not a function'
+    const formatCurrency = (amount) => {
+        // Ensure amount is a number, default to 0 if null/undefined/non-numeric
+        const numericAmount = typeof amount === 'number' ? amount : 0;
+        return new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        }).format(numericAmount);
+    };
+
+    // A single function to fetch any report type for the 'date-range' tab
+    const fetchDateRangeReport = async (reportType) => {
+        setLoadingDateRange(true);
         setError(''); // Clear errors before new fetch
+
+        const token = localStorage.getItem('token');
+        if (!token) {
+            setError('Authentication token not found. Please log in.');
+            setLoadingDateRange(false);
+            // Optionally redirect to login
+            navigate('/login');
+            return;
+        }
+
         try {
-            const token = localStorage.getItem('token');
             const config = {
                 headers: { 'x-auth-token': token },
-                params: { startDate, endDate } // Pass dates as query parameters
+                params: {
+                    startDate,
+                    endDate,
+                }
             };
-            const res = await axiosInstance.get(`/reports/${reportType}`, config);
-            switch (reportType) {
-                case 'spending-by-category':
-                    setSpendingReport(res.data);
-                    break;
-                case 'income-by-category':
-                    setIncomeReport(res.data);
-                    break;
-                case 'net-income':
-                    setNetIncomeReport(res.data);
-                    break;
-                default:
-                    break;
+
+            const url = `/reports/${reportType}`; // e.g., /reports/expenses-by-category, /reports/income-by-category, /reports/net-income
+
+            const res = await axiosInstance.get(url, config);
+
+            // Based on the reportType, update the correct state
+            if (reportType === 'expenses-by-category') {
+                // Ensure data is an array, default to empty array if not found or null
+                setSpendingReport(Array.isArray(res.data.expensesByCategory) ? res.data.expensesByCategory : []);
+            } else if (reportType === 'income-by-category') {
+                // Ensure data is an array, default to empty array if not found or null
+                setIncomeReport(Array.isArray(res.data.incomeByCategory) ? res.data.incomeByCategory : []);
+            } else if (reportType === 'net-income') {
+                
+                setNetIncomeReport({
+                    totalIncome: typeof res.data.totalIncome === 'number' ? res.data.totalIncome : 0,
+                    totalExpenses: typeof res.data.totalExpenses === 'number' ? res.data.totalExpenses : 0,
+                    netIncome: typeof res.data.netIncome === 'number' ? res.data.netIncome : 0,
+                });
             }
         } catch (err) {
-            setError(err.response?.data?.msg || 'Failed to fetch report.');
-            console.error(err);
+            console.error(`Failed to fetch ${reportType} report:`, err);
+            if (err.response) {
+                if (err.response.status === 401 || err.response.status === 403) {
+                    setError('Session expired or unauthorized. Please log in again.');
+                    localStorage.removeItem('token');
+                    setTimeout(() => navigate('/login'), 1500);
+                } else if (err.response.status === 404) {
+                    setError(`Report endpoint for ${reportType} not found. Please check backend routes.`);
+                } else {
+                    setError(err.response.data?.msg || `Failed to fetch ${reportType} report.`);
+                }
+            } else {
+                setError('Network error or server unreachable. Please check your internet connection.');
+            }
         } finally {
-            setLoading(false);
+            setLoadingDateRange(false);
         }
     };
 
@@ -56,28 +104,32 @@ const ReportsPage = () => {
             return;
         }
         setError(''); // Clear previous errors
-        // Only fetch if the 'date-range' tab is active
+
+        // Only generate reports if on the 'date-range' tab
         if (activeTab === 'date-range') {
-            fetchReport('spending-by-category');
-            fetchReport('income-by-category');
-            fetchReport('net-income');
+            fetchDateRangeReport('expenses-by-category');
+            fetchDateRangeReport('income-by-category');
+            fetchDateRangeReport('net-income');
         }
     };
 
     const renderSpendingReport = () => {
-        if (!spendingReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view spending by category.</Alert>;
-        if (spendingReport.length === 0) return <Alert variant="warning" className="mt-3 text-center">No expenses found for the selected period.</Alert>;
+        const reportData = spendingReport; // This is already an array due to handling in fetchDateRangeReport
 
-        const totalSpent = spendingReport.reduce((acc, item) => acc + item.totalSpent, 0);
+        if (reportData === null) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view spending by category.</Alert>;
+        // No need for Array.isArray(reportData) check here if fetchDateRangeReport ensures it's an array
+        if (reportData.length === 0) return <Alert variant="warning" className="mt-3 text-center">No expenses found for the selected period.</Alert>;
+
+        const totalSpent = reportData.reduce((acc, item) => acc + (typeof item.totalAmount === 'number' ? item.totalAmount : 0), 0);
 
         return (
             <div className="mt-3">
-                <h5 className="mb-3 text-center">Total Spent: ${totalSpent.toFixed(2)}</h5>
+                <h5 className="mb-3 text-center">Total Spent: {formatCurrency(totalSpent)}</h5>
                 <ListGroup>
-                    {spendingReport.map(item => (
+                    {reportData.map(item => (
                         <ListGroup.Item key={item._id} className="d-flex justify-content-between align-items-center">
                             {item._id}
-                            <span className="badge bg-danger">${item.totalSpent.toFixed(2)}</span>
+                            <span className="badge bg-danger">{formatCurrency(item.totalAmount)}</span>
                         </ListGroup.Item>
                     ))}
                 </ListGroup>
@@ -86,19 +138,22 @@ const ReportsPage = () => {
     };
 
     const renderIncomeReport = () => {
-        if (!incomeReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view income by category.</Alert>;
-        if (incomeReport.length === 0) return <Alert variant="warning" className="mt-3 text-center">No income found for the selected period.</Alert>;
+        const reportData = incomeReport; // This is already an array due to handling in fetchDateRangeReport
 
-        const totalReceived = incomeReport.reduce((acc, item) => acc + item.totalReceived, 0);
+        if (reportData === null) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view income by category.</Alert>;
+        // No need for Array.isArray(reportData) check here if fetchDateRangeReport ensures it's an array
+        if (reportData.length === 0) return <Alert variant="warning" className="mt-3 text-center">No income found for the selected period.</Alert>;
+
+        const totalReceived = reportData.reduce((acc, item) => acc + (typeof item.totalAmount === 'number' ? item.totalAmount : 0), 0);
 
         return (
             <div className="mt-3">
-                <h5 className="mb-3 text-center">Total Received: ${totalReceived.toFixed(2)}</h5>
+                <h5 className="mb-3 text-center">Total Received: {formatCurrency(totalReceived)}</h5>
                 <ListGroup>
-                    {incomeReport.map(item => (
+                    {reportData.map(item => (
                         <ListGroup.Item key={item._id} className="d-flex justify-content-between align-items-center">
                             {item._id}
-                            <span className="badge bg-success">${item.totalReceived.toFixed(2)}</span>
+                            <span className="badge bg-success">{formatCurrency(item.totalAmount)}</span>
                         </ListGroup.Item>
                     ))}
                 </ListGroup>
@@ -107,16 +162,17 @@ const ReportsPage = () => {
     };
 
     const renderNetIncomeReport = () => {
-        if (!netIncomeReport) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view net income.</Alert>;
+        if (netIncomeReport === null) return <Alert variant="info" className="mt-3 text-center">Select dates and click "Generate Reports" to view net income.</Alert>;
+        // The fetchDateRangeReport now ensures netIncomeReport has default numeric values.
 
         const { totalIncome: netTotalIncome, totalExpenses: netTotalExpenses, netIncome: calculatedNetIncome } = netIncomeReport;
 
         return (
             <div className="mt-3 text-center">
-                <p><strong>Total Income:</strong> <span className="text-success">${netTotalIncome.toFixed(2)}</span></p>
-                <p><strong>Total Expenses:</strong> <span className="text-danger">${netTotalExpenses.toFixed(2)}</span></p>
+                <p><strong>Total Income:</strong> <span className="text-success">{formatCurrency(netTotalIncome)}</span></p>
+                <p><strong>Total Expenses:</strong> <span className="text-danger">{formatCurrency(netTotalExpenses)}</span></p>
                 <Alert variant={calculatedNetIncome >= 0 ? 'success' : 'danger'} className="mt-3">
-                    <h4>Net Income/Loss: ${calculatedNetIncome.toFixed(2)}</h4>
+                    <h4>Net Income/Loss: {formatCurrency(calculatedNetIncome)}</h4>
                 </Alert>
             </div>
         );
@@ -126,22 +182,23 @@ const ReportsPage = () => {
         <Container className="mt-5">
             <h1 className="text-center mb-4">Financial Reports</h1>
 
-            <Card className="mb-4">
+            <Card className="mb-4 shadow-sm">
                 <Card.Body>
-                    <Card.Title className="mb-3">Select Report Period</Card.Title>
-                    {error && <Alert variant="danger">{error}</Alert>}
+                    <Card.Title className="mb-3 text-primary">Select Report Period</Card.Title>
+                    {error && <Alert variant="danger" className="text-center">{error}</Alert>}
                     <Tabs
                         id="report-tabs"
                         activeKey={activeTab}
                         onSelect={(k) => {
                             setActiveTab(k);
                             setError(''); // Clear error when switching tabs
-                            setLoading(false); // Stop loading if switching tabs
-                            // You might also want to clear report data when switching tabs
-                            // setSpendingReport(null);
-                            // setIncomeReport(null);
-                            // setNetIncomeReport(null);
-                            // setReportData(null); // For ReportGenerator's data
+                            setLoadingDateRange(false); // Only stop loading for date range tab
+                            // Reset reports when switching away from date-range tab
+                            if (k !== 'date-range') {
+                                setSpendingReport(null);
+                                setIncomeReport(null);
+                                setNetIncomeReport(null);
+                            }
                         }}
                         className="mb-3"
                         fill // Makes tabs take full width
@@ -174,37 +231,38 @@ const ReportsPage = () => {
                                             variant="primary"
                                             onClick={handleGenerateReports}
                                             className="w-100"
-                                            disabled={loading || activeTab !== 'date-range'} // Disable if not on this tab or loading
+                                            disabled={loadingDateRange} // Disable if loading
                                         >
-                                            {loading ? <Spinner animation="border" size="sm" /> : 'Generate Reports'}
+                                            {loadingDateRange ? <Spinner animation="border" size="sm" /> : 'Generate Reports'}
                                         </Button>
                                     </Col>
                                 </Row>
                             </Form>
 
                             {/* Render date-range report details within this tab */}
-                            {loading && activeTab === 'date-range' && (
+                            {loadingDateRange && (
                                 <div className="text-center mt-3">
-                                    <Spinner animation="border" role="status">
+                                    <Spinner animation="border" role="status" variant="primary">
                                         <span className="visually-hidden">Loading date range reports...</span>
                                     </Spinner>
-                                    <p className="mt-2">Generating your date range reports...</p>
+                                    <p className="mt-2 text-muted">Generating your date range reports...</p>
                                 </div>
                             )}
 
-                            {!loading && activeTab === 'date-range' && (
-                                <Card className="mt-4">
+                            {!loadingDateRange && (
+                                <Card className="mt-4 shadow-sm">
                                     <Card.Body>
-                                        <h3 className="mb-4 text-center">Date Range Report Results</h3>
+                                        <h3 className="mb-4 text-center text-secondary">Date Range Report Results</h3>
                                         <Tabs
                                             id="date-range-sub-tabs"
                                             activeKey={
-                                                (spendingReport && 'spending') ||
-                                                (incomeReport && 'income') ||
-                                                (netIncomeReport && 'net-income') ||
-                                                'spending' // Default to spending if no report yet
+                                                // Prioritize which tab to open if data exists
+                                                (spendingReport !== null && spendingReport.length > 0 && 'spending') ||
+                                                (incomeReport !== null && incomeReport.length > 0 && 'income') ||
+                                                (netIncomeReport !== null && (netIncomeReport.totalIncome !== 0 || netIncomeReport.totalExpenses !== 0) && 'net-income') ||
+                                                'spending' // Default to spending if no report data yet
                                             }
-                                            onSelect={() => { /* No specific action needed for sub-tabs here */ }}
+                                            // No specific onSelect for sub-tabs needed unless you want to log or change something
                                             className="mb-3"
                                             fill
                                         >
@@ -224,7 +282,7 @@ const ReportsPage = () => {
                         </Tab>
 
                         <Tab eventKey="dynamic-reports" title="Dynamic Reports">
-                            {/* Render ReportGenerator component here */}
+                            {/* The ReportGenerator component handles its own state and API calls */}
                             <ReportGenerator />
                         </Tab>
                     </Tabs>

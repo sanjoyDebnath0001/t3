@@ -8,17 +8,15 @@ const UserInformationSchema = new mongoose.Schema({
         unique: true // Ensures each user has only one profile
     },
     name: {
-        type: String,
-        trim: true
+        type: String
+        
     },
     bio: {
         type: String,
         maxlength: [200, 'Bio cannot be more than 200 words.']
     },
     profilepic: {
-        // Storing images directly in the database is often discouraged for performance.
-        // It's better to store a URL to a file in cloud storage (e.g., S3).
-        // This is a correct way if you choose to store the data directly.
+        
         data: Buffer,
         contentType: String
     },

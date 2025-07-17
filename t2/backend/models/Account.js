@@ -17,7 +17,7 @@ const AccountSchema = new mongoose.Schema({
     type: {
         type: String,
         required: [true, "Account type is required (e.g., 'Savings', 'Checking')"],
-        enum: ['Savings', 'Checking', 'Credit Card', 'Cash', 'Investment', 'Loan', 'Other'], // 'other' changed to 'Other' for enum consistency
+        enum: ['Savings', 'Checking', 'Credit Card', 'Cash', 'Investment', 'Loan', 'Other'],
         default: 'Checking' 
     },
     
@@ -28,7 +28,7 @@ const AccountSchema = new mongoose.Schema({
     },
     currentBalance: {
         type: Number,
-        // --- IMPROVED: currentBalance now defaults to initialBalance if not explicitly set ---
+        
         default: function() { return this.initialBalance; }
     },
     currency: {

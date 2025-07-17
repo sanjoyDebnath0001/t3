@@ -1,9 +1,9 @@
 // frontend/src/components/BudgetManager.jsx
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from 'axios'; // Still import axios if you use it elsewhere directly, but prioritize axiosInstance
 import { Container, Card, Button, Form, Alert, Row, Col, ListGroup } from 'react-bootstrap';
 import { FaEdit, FaTrashAlt, FaPlusCircle } from 'react-icons/fa'; // For icons (npm install react-icons)
-import axiosInstance from '../setting/axiosInstance';
+import axiosInstance from '../setting/axiosInstance'; // Assuming this is correctly configured
 
 const BudgetManager = () => {
     const [budgets, setBudgets] = useState([]);
@@ -45,7 +45,10 @@ const BudgetManager = () => {
 
     const onCategoryChange = (index, e) => {
         const newCategories = [...categories];
-        newCategories[index][e.target.name] = e.target.value;
+        // Ensure allocatedAmount is parsed as a float
+        newCategories[index][e.target.name] = e.target.name === 'allocatedAmount'
+            ? parseFloat(e.target.value) || 0 // Convert to number, default to 0 if invalid input
+            : e.target.value;
         setFormData({ ...formData, categories: newCategories });
     };
 
@@ -93,10 +96,13 @@ const BudgetManager = () => {
         setFormData({
             name: budget.name,
             period: budget.period,
-            startDate: budget.startDate.split('T')[0], // Format date for input
-            endDate: budget.endDate.split('T')[0],   // Format date for input
-            categories: budget.categories,
-            description: budget.description
+            startDate: budget.startDate ? budget.startDate.split('T')[0] : '', // Handle potential null/undefined startDate
+            endDate: budget.endDate ? budget.endDate.split('T')[0] : '',     // Handle potential null/undefined endDate
+            categories: budget.categories.map(cat => ({ // Ensure categories are copied and amounts are numbers
+                ...cat,
+                allocatedAmount: parseFloat(cat.allocatedAmount) || 0
+            })),
+            description: budget.description || '' // Ensure description is not null/undefined
         });
         setEditMode(true);
         setCurrentBudgetId(budget._id);
@@ -113,7 +119,9 @@ const BudgetManager = () => {
                 const config = {
                     headers: { 'x-auth-token': token }
                 };
-                await axios.delete(`/api/budgets/${id}`, config);
+                // CORRECTED: Use axiosInstance for consistency with other API calls
+                // This assumes axiosInstance is configured with the base URL, e.g., 'http://localhost:5000/api'
+                await axiosInstance.delete(`/budgets/${id}`, config);
                 setMessage('Budget deleted successfully!');
                 fetchBudgets();
             } catch (err) {
@@ -220,7 +228,7 @@ const BudgetManager = () => {
                                             type="number"
                                             placeholder="0"
                                             name="allocatedAmount"
-                                            value={cat.allocatedAmount}
+                                            value={cat.allocatedAmount} // This will now always be a number
                                             onChange={e => onCategoryChange(index, e)}
                                             min="0"
                                             required
@@ -289,7 +297,10 @@ const BudgetManager = () => {
                                         {new Date(budget.startDate).toLocaleDateString()} - {new Date(budget.endDate).toLocaleDateString()}
                                     </Card.Subtitle>
                                     <Card.Text>
-                                        <strong>Total Allocated:</strong> ${budget.totalAllocatedAmount.toFixed(2)}
+                                        {/* Ensure totalAllocatedAmount is a number before calling toFixed */}
+                                        <strong>Total Allocated:</strong> ${typeof budget.totalAllocatedAmount === 'number'
+                                            ? budget.totalAllocatedAmount.toFixed(2)
+                                            : '0.00'}
                                         {budget.description && <p className="mt-2">{budget.description}</p>}
                                     </Card.Text>
                                     <h6 className="mt-3">Categories:</h6>
@@ -298,7 +309,10 @@ const BudgetManager = () => {
                                             <ListGroup.Item key={idx} className="d-flex justify-content-between align-items-center">
                                                 {cat.name}
                                                 <span className={`badge ${cat.type === 'income' ? 'bg-success' : 'bg-danger'}`}>
-                                                    {cat.type === 'income' ? '+' : '-'}${cat.allocatedAmount.toFixed(2)}
+                                                    {/* Ensure allocatedAmount is a number before calling toFixed */}
+                                                    {cat.type === 'income' ? '+' : '-'}${typeof cat.allocatedAmount === 'number'
+                                                        ? cat.allocatedAmount.toFixed(2)
+                                                        : '0.00'}
                                                 </span>
                                             </ListGroup.Item>
                                         ))}

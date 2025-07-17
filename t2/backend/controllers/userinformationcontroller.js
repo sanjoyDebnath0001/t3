@@ -5,8 +5,7 @@ const UserInformation = require('../models/UserInformation');
 // @access  Private
 exports.getUserInformation = async (req, res) => {
     try {
-        // Find one document for the logged-in user.
-        // Returns an object or null, which is more appropriate than an array.
+        
         const userInformation = await UserInformation.findOne({ user: req.user.id });
 
         if (!userInformation) {
